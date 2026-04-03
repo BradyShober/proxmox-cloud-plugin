@@ -4,13 +4,17 @@ import com.cloudbees.plugins.credentials.CredentialsMatchers;
 import com.cloudbees.plugins.credentials.CredentialsProvider;
 import com.cloudbees.plugins.credentials.common.StandardListBoxModel;
 import hudson.Extension;
+import hudson.model.AsyncPeriodicWork;
 import hudson.model.Descriptor;
 import hudson.model.Label;
 import hudson.model.Node;
+import hudson.model.TaskListener;
+import hudson.plugins.sshslaves.SSHLauncher;
 import hudson.security.ACL;
 import hudson.slaves.Cloud;
 import hudson.slaves.ComputerLauncher;
 import hudson.slaves.DumbSlave;
+import hudson.slaves.JNLPLauncher;
 import hudson.slaves.NodeProvisioner;
 import hudson.util.FormValidation;
 import hudson.util.ListBoxModel;
@@ -20,6 +24,8 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import jenkins.model.Jenkins;
@@ -42,48 +48,97 @@ public class ProxmoxCloud extends Cloud {
     private final ProxmoxAgentTemplate agentTemplate;
     private final List<ProxmoxInstance> instances;
     private transient ProxmoxClient proxmoxClient;
+    /** Tracks async provisions in-flight so the reconciler doesn't over-provision. */
+    private transient AtomicInteger pendingProvisions;
+    /**
+     * Guards the {@code getNextVmId → cloneVm} sequence so that concurrent provisioning
+     * threads cannot obtain the same VM ID from Proxmox before any clone has been submitted.
+     */
+    private transient volatile Object vmAllocationLock;
 
     @DataBoundConstructor
     public ProxmoxCloud(
             String name,
             String host,
             String apiTokenCredentialId,
-            boolean verifySsl,
+            boolean skipTlsVerification,
             String node,
             String templateVmId,
             String agentNameTemplate,
+            int minInstances,
             int maxInstances,
-            String launcherStrategy,
+            int idleMinutesBeforeTermination,
+            ComputerLauncher launcher,
             String sshUsername,
-            String sshPrivateKey,
             String sshPublicKey,
-            int sshPort,
-            String labels) {
+            String labels,
+            String remoteFsRoot) {
         super(name);
         this.serverConfig = new ProxmoxServerConfig(
-                host, apiTokenCredentialId, verifySsl, node == null || node.isBlank() ? "pve" : node);
+                host, apiTokenCredentialId, !skipTlsVerification, node == null || node.isBlank() ? "pve" : node);
 
-        // Parse launcher strategy from string (form dropdown passes string)
-        ProxmoxAgentTemplate.LauncherStrategy strategy;
-        try {
-            strategy = launcherStrategy != null && !launcherStrategy.isBlank()
-                    ? ProxmoxAgentTemplate.LauncherStrategy.valueOf(launcherStrategy)
-                    : ProxmoxAgentTemplate.LauncherStrategy.SSH;
-        } catch (IllegalArgumentException e) {
-            strategy = ProxmoxAgentTemplate.LauncherStrategy.SSH;
-        }
+        ComputerLauncher configuredLauncher = launcher != null ? launcher : defaultLauncher();
 
         this.agentTemplate = new ProxmoxAgentTemplate(
                 templateVmId,
                 agentNameTemplate == null || agentNameTemplate.isBlank() ? "proxmox-agent" : agentNameTemplate,
+                Math.max(0, minInstances),
                 maxInstances > 0 ? maxInstances : 1,
-                strategy,
+                configuredLauncher,
                 sshUsername == null || sshUsername.isBlank() ? "jenkins" : sshUsername,
-                sshPrivateKey,
                 sshPublicKey,
-                sshPort > 0 ? sshPort : 22,
-                labels == null || labels.isBlank() ? "proxmox" : labels);
+                labels == null || labels.isBlank() ? "proxmox" : labels,
+                remoteFsRoot == null || remoteFsRoot.isBlank() ? "/home/jenkins" : remoteFsRoot,
+                idleMinutesBeforeTermination > 0
+                        ? idleMinutesBeforeTermination
+                        : ProxmoxRetentionStrategy.DEFAULT_IDLE_MINUTES);
         this.instances = Collections.synchronizedList(new ArrayList<>());
+    }
+
+    private static ComputerLauncher defaultLauncher() {
+        JNLPLauncher launcher = new JNLPLauncher();
+        launcher.setWebSocket(true);
+        return launcher;
+    }
+
+    /** Lazily initialise the transient pending-provisions counter (survives XStream round-trip). */
+    private AtomicInteger getPendingProvisions() {
+        if (pendingProvisions == null) {
+            synchronized (this) {
+                if (pendingProvisions == null) {
+                    pendingProvisions = new AtomicInteger(0);
+                }
+            }
+        }
+        return pendingProvisions;
+    }
+
+    /** Lazily initialise the VM-allocation lock (survives XStream round-trip). */
+    private Object getVmAllocationLock() {
+        if (vmAllocationLock == null) {
+            synchronized (this) {
+                if (vmAllocationLock == null) {
+                    vmAllocationLock = new Object();
+                }
+            }
+        }
+        return vmAllocationLock;
+    }
+
+    /**
+     * Count the number of Jenkins nodes that are owned by this cloud instance.
+     * Uses the live Jenkins node list rather than the (possibly stale) {@link #instances} list.
+     */
+    int countLiveCloudNodes() {
+        Jenkins jenkins = Jenkins.getInstanceOrNull();
+        if (jenkins == null) return 0;
+        return (int) jenkins.getNodes().stream()
+                .filter(node -> node instanceof hudson.model.Slave)
+                .map(node -> (hudson.model.Slave) node)
+                .filter(node -> node.getRetentionStrategy() instanceof ProxmoxRetentionStrategy)
+                .map(node -> (ProxmoxRetentionStrategy) node.getRetentionStrategy())
+                .filter(strategy -> name.equals(strategy.getCloudName()))
+                .count();
     }
 
     /**
@@ -121,17 +176,16 @@ public class ProxmoxCloud extends Cloud {
 
         List<NodeProvisioner.PlannedNode> plannedNodes = new ArrayList<>();
 
-        if (excessWorkload <= 0) {
-            return plannedNodes;
-        }
-
         try {
             if (proxmoxClient == null) {
                 initializeClient();
             }
 
-            // Check current instance count against max
-            int currentCount = instances.size();
+            // Check current instance count against max.
+            // Use the live Jenkins node count (more accurate than the in-memory list after restarts)
+            // plus any in-flight provisions from the reconciler to avoid over-provisioning.
+            int currentCount = Math.max(instances.size(),
+                    countLiveCloudNodes() + getPendingProvisions().get());
             int maxInstances = agentTemplate.getMaxInstances();
             int availableCapacity = maxInstances - currentCount;
 
@@ -140,8 +194,14 @@ public class ProxmoxCloud extends Cloud {
                 return plannedNodes;
             }
 
-            // Provision as many instances as needed (up to available capacity)
-            int instancesToProvision = Math.min(excessWorkload, availableCapacity);
+            int queueDemand = Math.max(0, excessWorkload);
+            int minFloorDemand = Math.max(0, agentTemplate.getMinInstances() - currentCount);
+
+            // Keep floor capacity warm while also satisfying queue demand.
+            int instancesToProvision = Math.min(Math.max(queueDemand, minFloorDemand), availableCapacity);
+            if (instancesToProvision <= 0) {
+                return plannedNodes;
+            }
 
             for (int i = 0; i < instancesToProvision; i++) {
                 // Generate unique agent name
@@ -188,31 +248,43 @@ public class ProxmoxCloud extends Cloud {
     private Node provisionAgent(String agentName, String cloudInitScript) throws Exception {
         LOGGER.log(Level.INFO, "Starting provisioning of agent: " + agentName);
 
-        // Fetch a valid integer VM ID from Proxmox to avoid conflicts
-        String vmId = proxmoxClient.getNextVmId();
-        LOGGER.log(Level.FINE, "Allocated VM ID from Proxmox for " + agentName + ": " + vmId);
+        ComputerLauncher configuredLauncher = agentTemplate.getLauncher();
+        boolean inboundLauncher = isInboundLauncher(configuredLauncher);
+        boolean sshLauncher = configuredLauncher instanceof SSHLauncher;
 
-        ProxmoxAgentTemplate.LauncherStrategy strategy = agentTemplate.getLauncherStrategy();
-
-        // Compute the JNLP secret now (before clone) so the node can be pre-registered.
-        // The secret is injected post-boot via guest agent — not via cloud-init snippets,
-        // which the Proxmox REST API does not support for snippet content type.
+        // Compute the JNLP secret up front – it only depends on agentName, not vmId.
+        // The secret is injected post-boot via the QEMU guest agent (not cloud-init).
         String jnlpSecret = null;
-        DumbSlave preRegisteredNode = null;
-        if (strategy == ProxmoxAgentTemplate.LauncherStrategy.WEBSOCKET) {
+        if (inboundLauncher) {
             jnlpSecret = JnlpSlaveAgentProtocol.SLAVE_SECRET.mac(agentName);
             LOGGER.log(Level.FINE, "Computed inbound agent secret for " + agentName);
+        }
 
-            // Pre-register so Jenkins accepts the inbound connection
+        // -----------------------------------------------------------------------
+        // Allocate a VM ID and immediately submit the clone task while holding the
+        // vmAllocationLock.  This prevents concurrent provisioning threads from
+        // calling getNextVmId() before any clone has been registered in Proxmox,
+        // which would cause every thread to receive the same ID.
+        // -----------------------------------------------------------------------
+        String vmId;
+        String upidClone;
+        String templateVmId = agentTemplate.getTemplateVmId();
+        synchronized (getVmAllocationLock()) {
+            vmId = proxmoxClient.getNextVmId();
+            LOGGER.log(Level.FINE, "Allocated VM ID from Proxmox for " + agentName + ": " + vmId);
+            upidClone = proxmoxClient.cloneVmWithCloudInit(templateVmId, vmId, agentName, null);
+            LOGGER.log(Level.FINE, "Clone task started for VM " + vmId + ": " + upidClone);
+        }
+
+        // Pre-register the Jenkins node now that the real vmId is known.
+        // This must happen before the VM boots so Jenkins can accept the inbound connection.
+        DumbSlave preRegisteredNode = null;
+        if (inboundLauncher) {
             preRegisteredNode = buildDumbSlave(agentName, vmId, null);
             Jenkins.get().addNode(preRegisteredNode);
             LOGGER.log(Level.INFO, "Pre-registered Jenkins node for inbound agent: " + agentName);
         }
 
-        // Clone the template VM (no cicustom — snippet upload is not supported via Proxmox API)
-        String templateVmId = agentTemplate.getTemplateVmId();
-        String upidClone = proxmoxClient.cloneVmWithCloudInit(templateVmId, vmId, agentName, null);
-        LOGGER.log(Level.FINE, "Clone task started for VM " + vmId + ": " + upidClone);
 
         // Track this instance
         ProxmoxInstance instance = new ProxmoxInstance(vmId, agentName);
@@ -249,7 +321,7 @@ public class ProxmoxCloud extends Cloud {
         // secret via QEMU guest agent, then start the service.
         // Requires qemu-guest-agent and Java to be pre-installed in the template.
         // -----------------------------------------------------------------------
-        if (strategy == ProxmoxAgentTemplate.LauncherStrategy.WEBSOCKET && jnlpSecret != null) {
+        if (inboundLauncher && jnlpSecret != null) {
             String serviceContent = buildJenkinsAgentServiceContent(agentName, jnlpSecret);
             LOGGER.log(Level.FINE, "Waiting for QEMU guest agent on VM " + vmId);
             proxmoxClient.waitForGuestAgent(vmId);
@@ -273,7 +345,7 @@ public class ProxmoxCloud extends Cloud {
         // -----------------------------------------------------------------------
         // SSH mode: resolve IP via QEMU guest agent, then create + return the node.
         // -----------------------------------------------------------------------
-        if (strategy == ProxmoxAgentTemplate.LauncherStrategy.SSH) {
+        if (sshLauncher) {
             LOGGER.log(Level.FINE, "Resolving IP address for VM " + vmId + " via QEMU guest agent");
             try {
                 String ipAddress = proxmoxClient.getVmIpAddress(vmId);
@@ -332,28 +404,56 @@ public class ProxmoxCloud extends Cloud {
      *                  WebSocket/inbound agents
      */
     private DumbSlave buildDumbSlave(String agentName, String vmId, String ipAddress) throws Exception {
-        ProxmoxAgentTemplate.LauncherStrategy strategy = agentTemplate.getLauncherStrategy();
-
-        ComputerLauncher launcher =
-                switch (strategy) {
-                    case SSH ->
-                        new ProxmoxSshLauncher(
-                                ipAddress,
-                                agentTemplate.getSshPort(),
-                                agentTemplate.getSshUsername(),
-                                agentTemplate.getSshPrivateKey());
-                    case WEBSOCKET -> new ProxmoxWebSocketLauncher(ipAddress);
-                };
+        ComputerLauncher launcher = buildNodeLauncher(ipAddress);
 
         return new DumbSlave(
                 agentName,
                 "Proxmox provisioned agent (VM " + vmId + ")",
-                "/home/jenkins",
+                agentTemplate.getRemoteFsRoot(),
                 "1",
                 Node.Mode.NORMAL,
                 agentTemplate.getLabels(),
                 launcher,
-                new ProxmoxRetentionStrategy(name, vmId, ProxmoxRetentionStrategy.DEFAULT_IDLE_MINUTES));
+                new ProxmoxRetentionStrategy(name, vmId, agentTemplate.getIdleMinutesBeforeTermination()));
+    }
+
+    private ComputerLauncher buildNodeLauncher(String ipAddress) throws IOException {
+        ComputerLauncher launcherTemplate = agentTemplate.getLauncher();
+        if (launcherTemplate instanceof SSHLauncher sshTemplate) {
+            if (ipAddress == null || ipAddress.isBlank()) {
+                throw new IOException("SSH launcher requires a resolved VM IP address");
+            }
+
+            SSHLauncher nodeSshLauncher = new SSHLauncher(
+                    ipAddress,
+                    sshTemplate.getPort(),
+                    sshTemplate.getCredentialsId(),
+                    sshTemplate.getJvmOptions(),
+                    sshTemplate.getJavaPath(),
+                    sshTemplate.getPrefixStartSlaveCmd(),
+                    sshTemplate.getSuffixStartSlaveCmd(),
+                    sshTemplate.getLaunchTimeoutSeconds(),
+                    sshTemplate.getMaxNumRetries(),
+                    sshTemplate.getRetryWaitTime(),
+                    sshTemplate.getSshHostKeyVerificationStrategy());
+            nodeSshLauncher.setTcpNoDelay(sshTemplate.getTcpNoDelay());
+            nodeSshLauncher.setWorkDir(sshTemplate.getWorkDir());
+            return nodeSshLauncher;
+        }
+
+        if (launcherTemplate instanceof JNLPLauncher jnlpTemplate) {
+            JNLPLauncher nodeJnlpLauncher = new JNLPLauncher();
+            nodeJnlpLauncher.setWebSocket(jnlpTemplate.isWebSocket());
+            nodeJnlpLauncher.setTunnel(jnlpTemplate.getTunnel());
+            nodeJnlpLauncher.setWorkDirSettings(jnlpTemplate.getWorkDirSettings());
+            return nodeJnlpLauncher;
+        }
+
+        return launcherTemplate;
+    }
+
+    private boolean isInboundLauncher(ComputerLauncher launcher) {
+        return launcher instanceof JNLPLauncher;
     }
 
     /**
@@ -570,6 +670,73 @@ public class ProxmoxCloud extends Cloud {
     }
 
     /**
+     * Proactively provision agents to ensure the cloud stays at or above {@code minInstances}.
+     * Called by the periodic {@link MinInstancesReconciler} every minute, independent of queue demand.
+     */
+    public void reconcileMinInstances() {
+        int minInstances = agentTemplate.getMinInstances();
+        if (minInstances <= 0) {
+            return; // No minimum configured – nothing to do.
+        }
+
+        int liveCount = countLiveCloudNodes();
+        int inFlight = getPendingProvisions().get();
+        int effectiveCount = liveCount + inFlight;
+
+        if (effectiveCount >= minInstances) {
+            return; // Already at or above the floor.
+        }
+
+        int deficit = Math.min(
+                minInstances - effectiveCount,
+                agentTemplate.getMaxInstances() - effectiveCount);
+        if (deficit <= 0) {
+            return;
+        }
+
+        LOGGER.log(
+                Level.INFO,
+                "Cloud ''{0}'': live={1}, inFlight={2}, min={3} → provisioning {4} agent(s) to maintain minimum floor",
+                new Object[] {name, liveCount, inFlight, minInstances, deficit});
+
+        try {
+            if (proxmoxClient == null) {
+                initializeClient();
+            }
+        } catch (Exception e) {
+            LOGGER.log(
+                    Level.SEVERE,
+                    "Cannot initialise Proxmox client for minimum-floor reconciliation on cloud '" + name + "'",
+                    e);
+            return;
+        }
+
+        boolean inbound = isInboundLauncher(agentTemplate.getLauncher());
+        for (int i = 0; i < deficit; i++) {
+            String agentName = generateAgentName();
+            String cloudInitScript = generateCloudInitScript(agentName);
+            getPendingProvisions().incrementAndGet();
+            java.util.concurrent.CompletableFuture.runAsync(() -> {
+                try {
+                    Node node = provisionAgent(agentName, cloudInitScript);
+                    // Inbound (JNLP/WebSocket) agents are pre-registered inside provisionAgent();
+                    // SSH agents are returned and must be added here.
+                    if (node != null && !inbound) {
+                        Jenkins.get().addNode(node);
+                    }
+                } catch (Exception e) {
+                    LOGGER.log(
+                            Level.SEVERE,
+                            "Failed to provision minimum-floor agent '" + agentName + "' for cloud '" + name + "'",
+                            e);
+                } finally {
+                    getPendingProvisions().decrementAndGet();
+                }
+            });
+        }
+    }
+
+    /**
      * Stop and delete a Proxmox VM that was backing a Jenkins agent.
      * This method is called by {@link ProxmoxRetentionStrategy} when the agent
      * becomes idle beyond the configured threshold.
@@ -629,6 +796,10 @@ public class ProxmoxCloud extends Cloud {
         return serverConfig.isVerifySsl();
     }
 
+    public boolean isSkipTlsVerification() {
+        return !serverConfig.isVerifySsl();
+    }
+
     public ProxmoxAgentTemplate getAgentTemplate() {
         return agentTemplate;
     }
@@ -645,36 +816,95 @@ public class ProxmoxCloud extends Cloud {
         return agentTemplate.getMaxInstances();
     }
 
-    public ProxmoxAgentTemplate.LauncherStrategy getLauncherStrategy() {
-        return agentTemplate.getLauncherStrategy();
+    public int getMinInstances() {
+        return agentTemplate.getMinInstances();
     }
 
-    public String getLauncherStrategyString() {
-        return agentTemplate.getLauncherStrategy().name();
+    public ComputerLauncher getLauncher() {
+        return agentTemplate.getLauncher();
     }
 
     public String getSshUsername() {
         return agentTemplate.getSshUsername();
     }
 
-    public String getSshPrivateKey() {
-        return agentTemplate.getSshPrivateKey();
-    }
-
     public String getSshPublicKey() {
         return agentTemplate.getSshPublicKey();
-    }
-
-    public int getSshPort() {
-        return agentTemplate.getSshPort();
     }
 
     public String getLabels() {
         return agentTemplate.getLabels();
     }
 
+    public String getRemoteFsRoot() {
+        return agentTemplate.getRemoteFsRoot();
+    }
+
+    public int getIdleMinutesBeforeTermination() {
+        return agentTemplate.getIdleMinutesBeforeTermination();
+    }
+
     public List<ProxmoxInstance> getInstances() {
         return new ArrayList<>(instances);
+    }
+
+    public synchronized boolean canTerminateVmForScaleDown(String vmId) {
+        int minInstances = agentTemplate.getMinInstances();
+        if (minInstances <= 0) {
+            return true; // No floor configured – always allow termination.
+        }
+
+        Jenkins jenkins = Jenkins.getInstanceOrNull();
+        if (jenkins == null) {
+            return false;
+        }
+
+        long activeCount = jenkins.getNodes().stream()
+                .filter(node -> node instanceof hudson.model.Slave)
+                .map(node -> (hudson.model.Slave) node)
+                .filter(node -> node.getRetentionStrategy() instanceof ProxmoxRetentionStrategy)
+                .map(node -> (ProxmoxRetentionStrategy) node.getRetentionStrategy())
+                .filter(strategy -> name.equals(strategy.getCloudName()))
+                .count();
+
+        return activeCount > minInstances;
+    }
+
+    /**
+     * Periodic task that runs every minute and ensures every {@link ProxmoxCloud} stays at or above
+     * its configured {@code minInstances} floor, independent of the Jenkins build queue.
+     */
+    @Extension
+    public static class MinInstancesReconciler extends AsyncPeriodicWork {
+
+        public MinInstancesReconciler() {
+            super("Proxmox minimum instances reconciler");
+        }
+
+        @Override
+        public long getRecurrencePeriod() {
+            return TimeUnit.MINUTES.toMillis(1);
+        }
+
+        @Override
+        protected void execute(TaskListener listener) throws IOException, InterruptedException {
+            Jenkins jenkins = Jenkins.getInstanceOrNull();
+            if (jenkins == null) {
+                return;
+            }
+            for (Cloud cloud : jenkins.clouds) {
+                if (cloud instanceof ProxmoxCloud proxmoxCloud) {
+                    try {
+                        proxmoxCloud.reconcileMinInstances();
+                    } catch (Exception e) {
+                        LOGGER.log(
+                                Level.WARNING,
+                                "Minimum-floor reconciliation error for cloud '" + cloud.name + "'",
+                                e);
+                    }
+                }
+            }
+        }
     }
 
     @Extension
@@ -711,13 +941,6 @@ public class ProxmoxCloud extends Cloud {
             return FormValidation.ok();
         }
 
-        public ListBoxModel doFillLauncherStrategyItems() {
-            ListBoxModel items = new ListBoxModel();
-            for (ProxmoxAgentTemplate.LauncherStrategy strategy : ProxmoxAgentTemplate.LauncherStrategy.values()) {
-                items.add(strategy.getDisplayName(), strategy.name());
-            }
-            return items;
-        }
 
         @Override
         public String getDisplayName() {

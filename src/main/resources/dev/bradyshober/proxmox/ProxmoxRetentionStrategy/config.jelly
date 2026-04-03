@@ -1,0 +1,15 @@
+<?jelly escape-by-default='true'?>
+<j:jelly xmlns:j="jelly:core" xmlns:f="/lib/form">
+    <!-- Preserve provenance fields so VM cleanup still works after node config round-trips. -->
+    <f:invisibleEntry>
+        <f:textbox field="cloudName" clazz="jenkins-hidden"/>
+    </f:invisibleEntry>
+
+    <f:invisibleEntry>
+        <f:textbox field="vmId" clazz="jenkins-hidden"/>
+    </f:invisibleEntry>
+
+    <f:entry title="${%Idle Minutes Before Termination}" field="idleMinutes">
+        <f:number default="5" min="1"/>
+    </f:entry>
+</j:jelly>

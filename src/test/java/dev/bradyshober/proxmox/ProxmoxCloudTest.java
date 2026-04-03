@@ -8,6 +8,7 @@ import com.cloudbees.plugins.credentials.domains.Domain;
 import com.google.gson.JsonObject;
 import hudson.model.Label;
 import hudson.model.labels.LabelAtom;
+import hudson.plugins.sshslaves.SSHLauncher;
 import hudson.slaves.ComputerLauncher;
 import hudson.slaves.DumbSlave;
 import hudson.slaves.JNLPLauncher;
@@ -37,35 +38,40 @@ public class ProxmoxCloudTest {
         serverConfig = new ProxmoxServerConfig(
                 "https://proxmox.example.com:8006",
                 "proxmox-api-token",
-                false, // Don't verify SSL for testing
+                true, // Validate SSL by default
                 "pve");
+
+        JNLPLauncher launcher = new JNLPLauncher();
+        launcher.setWebSocket(true);
 
         agentTemplate = new ProxmoxAgentTemplate(
                 "100", // Template VM ID
                 "proxmox-agent",
+                1,
                 5, // Max instances
-                ProxmoxAgentTemplate.LauncherStrategy.SSH,
+                launcher,
                 "jenkins",
-                "/home/jenkins/.ssh/id_rsa",
                 "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAAB jenkins@controller",
-                22,
-                "proxmox");
+                "proxmox",
+                "/home/jenkins",
+                7);
 
         proxmoxCloud = new ProxmoxCloud(
                 "Proxmox",
                 serverConfig.getHost(),
                 serverConfig.getApiTokenCredentialId(),
-                serverConfig.isVerifySsl(),
+                !serverConfig.isVerifySsl(),
                 serverConfig.getNode(),
                 agentTemplate.getTemplateVmId(),
                 agentTemplate.getAgentNameTemplate(),
+                agentTemplate.getMinInstances(),
                 agentTemplate.getMaxInstances(),
-                agentTemplate.getLauncherStrategy().name(),
+                agentTemplate.getIdleMinutesBeforeTermination(),
+                agentTemplate.getLauncher(),
                 agentTemplate.getSshUsername(),
-                agentTemplate.getSshPrivateKey(),
                 agentTemplate.getSshPublicKey(),
-                agentTemplate.getSshPort(),
-                agentTemplate.getLabels());
+                agentTemplate.getLabels(),
+                agentTemplate.getRemoteFsRoot());
     }
 
     @Test
@@ -73,7 +79,7 @@ public class ProxmoxCloudTest {
         assertNotNull(serverConfig);
         assertEquals("https://proxmox.example.com:8006", serverConfig.getHost());
         assertEquals("proxmox-api-token", serverConfig.getApiTokenCredentialId());
-        assertFalse(serverConfig.isVerifySsl());
+        assertTrue(serverConfig.isVerifySsl());
     }
 
     @Test
@@ -81,13 +87,14 @@ public class ProxmoxCloudTest {
         assertNotNull(agentTemplate);
         assertEquals("100", agentTemplate.getTemplateVmId());
         assertEquals("proxmox-agent", agentTemplate.getAgentNameTemplate());
+        assertEquals(1, agentTemplate.getMinInstances());
         assertEquals(5, agentTemplate.getMaxInstances());
-        assertEquals(ProxmoxAgentTemplate.LauncherStrategy.SSH, agentTemplate.getLauncherStrategy());
+        assertInstanceOf(JNLPLauncher.class, agentTemplate.getLauncher());
         assertEquals("jenkins", agentTemplate.getSshUsername());
-        assertEquals("/home/jenkins/.ssh/id_rsa", agentTemplate.getSshPrivateKey());
         assertEquals("ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAAB jenkins@controller", agentTemplate.getSshPublicKey());
-        assertEquals(22, agentTemplate.getSshPort());
         assertEquals("proxmox", agentTemplate.getLabels());
+        assertEquals("/home/jenkins", agentTemplate.getRemoteFsRoot());
+        assertEquals(7, agentTemplate.getIdleMinutesBeforeTermination());
     }
 
     @Test
@@ -99,6 +106,10 @@ public class ProxmoxCloudTest {
         assertEquals("proxmox-api-token", proxmoxCloud.getApiTokenCredentialId());
         assertEquals("https://proxmox.example.com:8006", proxmoxCloud.getHost());
         assertEquals("ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAAB jenkins@controller", proxmoxCloud.getSshPublicKey());
+        assertEquals("/home/jenkins", proxmoxCloud.getRemoteFsRoot());
+        assertEquals(1, proxmoxCloud.getMinInstances());
+        assertEquals(7, proxmoxCloud.getIdleMinutesBeforeTermination());
+        assertFalse(proxmoxCloud.isSkipTlsVerification());
         assertTrue(proxmoxCloud.getInstances().isEmpty());
     }
 
@@ -121,7 +132,9 @@ public class ProxmoxCloudTest {
 
     @Test
     public void testCanProvisionWithMultipleLabels() {
-        // Create cloud with multiple labels
+        JNLPLauncher launcher = new JNLPLauncher();
+        launcher.setWebSocket(true);
+
         ProxmoxCloud multiLabelCloud = new ProxmoxCloud(
                 "MultiLabel",
                 "https://proxmox.example.com:8006",
@@ -130,13 +143,14 @@ public class ProxmoxCloudTest {
                 "pve",
                 "100",
                 "proxmox-agent",
+                0,
                 5,
-                "SSH",
+                5,
+                launcher,
                 "jenkins",
-                "/home/jenkins/.ssh/id_rsa",
                 null,
-                22,
-                "proxmox linux docker");
+                "proxmox linux docker",
+                "/home/jenkins");
 
         assertTrue(multiLabelCloud.canProvision(new LabelAtom("proxmox")));
         assertTrue(multiLabelCloud.canProvision(new LabelAtom("linux")));
@@ -196,6 +210,9 @@ public class ProxmoxCloudTest {
     @Test
     @WithJenkins
     public void testBuildDumbSlaveUsesInboundWebSocketLauncher(JenkinsRule jenkinsRule) throws Exception {
+        JNLPLauncher launcher = new JNLPLauncher();
+        launcher.setWebSocket(true);
+
         ProxmoxCloud websocketCloud = new ProxmoxCloud(
                 "WebSocketCloud",
                 "https://proxmox.example.com:8006",
@@ -204,28 +221,50 @@ public class ProxmoxCloudTest {
                 "pve",
                 "100",
                 "proxmox-agent",
+                0,
                 5,
-                "WEBSOCKET",
+                5,
+                launcher,
                 "jenkins",
-                "/home/jenkins/.ssh/id_rsa",
                 null,
-                22,
-                "proxmox");
+                "proxmox",
+                "/home/jenkins");
 
         DumbSlave slave = buildDumbSlave(websocketCloud, "proxmox-agent-1", "101", null);
-        ComputerLauncher launcher = slave.getLauncher();
+        ComputerLauncher nodeLauncher = slave.getLauncher();
 
-        assertInstanceOf(ProxmoxWebSocketLauncher.class, launcher);
-        assertInstanceOf(JNLPLauncher.class, launcher);
-        assertTrue(((JNLPLauncher) launcher).isWebSocket(), "WebSocket launcher must be marked as inbound/WebSocket");
+        assertInstanceOf(JNLPLauncher.class, nodeLauncher);
+        assertTrue(((JNLPLauncher) nodeLauncher).isWebSocket(), "Launcher should use WebSocket for inbound mode");
+        assertEquals("/home/jenkins", slave.getRemoteFS());
     }
 
     @Test
     @WithJenkins
-    public void testBuildDumbSlaveUsesSshLauncherForSshStrategy(JenkinsRule jenkinsRule) throws Exception {
-        DumbSlave slave = buildDumbSlave(proxmoxCloud, "proxmox-agent-1", "101", "192.0.2.10");
+    public void testBuildDumbSlaveUsesNativeSshLauncherForSshTemplate(JenkinsRule jenkinsRule) throws Exception {
+        SSHLauncher launcher = new SSHLauncher("0.0.0.0", 22, "ssh-credential-id");
 
-        assertInstanceOf(ProxmoxSshLauncher.class, slave.getLauncher());
+        ProxmoxCloud sshCloud = new ProxmoxCloud(
+                "SshCloud",
+                "https://proxmox.example.com:8006",
+                "proxmox-api-token",
+                false,
+                "pve",
+                "100",
+                "proxmox-agent",
+                0,
+                5,
+                5,
+                launcher,
+                "jenkins",
+                null,
+                "proxmox",
+                "/home/jenkins");
+
+        DumbSlave slave = buildDumbSlave(sshCloud, "proxmox-agent-1", "101", "192.0.2.10");
+
+        assertInstanceOf(SSHLauncher.class, slave.getLauncher());
+        assertEquals("192.0.2.10", ((SSHLauncher) slave.getLauncher()).getHost());
+        assertEquals("/home/jenkins", slave.getRemoteFS());
     }
 
     @Test
@@ -278,6 +317,174 @@ public class ProxmoxCloudTest {
         assertEquals(FormValidation.Kind.ERROR, descriptor.doCheckApiTokenCredentialId("missing-credential").kind);
     }
 
+    @Test
+    @WithJenkins
+    public void testNodeConfigRoundTripBindsProxmoxRetentionStrategy(JenkinsRule jenkinsRule) throws Exception {
+        DumbSlave slave = buildDumbSlave(proxmoxCloud, "proxmox-agent-1", "101", null);
+        jenkinsRule.jenkins.addNode(slave);
+
+        DumbSlave reconfigured = (DumbSlave) jenkinsRule.configRoundtrip(slave);
+        assertInstanceOf(ProxmoxRetentionStrategy.class, reconfigured.getRetentionStrategy());
+
+        ProxmoxRetentionStrategy retention = (ProxmoxRetentionStrategy) reconfigured.getRetentionStrategy();
+        assertEquals("Proxmox", retention.getCloudName());
+        assertEquals("101", retention.getVmId());
+        assertEquals(7, retention.getIdleMinutes());
+    }
+
+    @Test
+    @WithJenkins
+    public void testCanTerminateVmForScaleDownRespectsMinInstancesFloor(JenkinsRule jenkinsRule) throws Exception {
+        JNLPLauncher launcher = new JNLPLauncher();
+        launcher.setWebSocket(true);
+
+        ProxmoxCloud minCloud = new ProxmoxCloud(
+                "FloorCloud",
+                "https://proxmox.example.com:8006",
+                "proxmox-api-token",
+                false,
+                "pve",
+                "100",
+                "proxmox-agent",
+                1,
+                5,
+                5,
+                launcher,
+                "jenkins",
+                null,
+                "proxmox",
+                "/home/jenkins");
+
+        DumbSlave slave1 = buildDumbSlave(minCloud, "floor-agent-1", "201", null);
+        jenkinsRule.jenkins.addNode(slave1);
+
+        // Only 1 node; at the floor – should NOT allow termination.
+        assertFalse(minCloud.canTerminateVmForScaleDown("201"));
+
+        DumbSlave slave2 = buildDumbSlave(minCloud, "floor-agent-2", "202", null);
+        jenkinsRule.jenkins.addNode(slave2);
+
+        // 2 nodes with floor=1 – can terminate one.
+        assertTrue(minCloud.canTerminateVmForScaleDown("202"));
+    }
+
+    @Test
+    @WithJenkins
+    public void testCanTerminateVmForScaleDownAllowsTerminationWhenMinIsZero(JenkinsRule jenkinsRule) throws Exception {
+        JNLPLauncher launcher = new JNLPLauncher();
+        launcher.setWebSocket(true);
+
+        ProxmoxCloud noFloorCloud = new ProxmoxCloud(
+                "NoFloorCloud",
+                "https://proxmox.example.com:8006",
+                "proxmox-api-token",
+                false,
+                "pve",
+                "100",
+                "proxmox-agent",
+                0, // minInstances = 0 → no floor
+                5,
+                5,
+                launcher,
+                "jenkins",
+                null,
+                "proxmox",
+                "/home/jenkins");
+
+        DumbSlave slave = buildDumbSlave(noFloorCloud, "solo-agent", "301", null);
+        jenkinsRule.jenkins.addNode(slave);
+
+        // minInstances=0 → always allow termination even with only 1 node.
+        assertTrue(noFloorCloud.canTerminateVmForScaleDown("301"));
+    }
+
+    @Test
+    @WithJenkins
+    public void testCountLiveCloudNodesReturnsCorrectCount(JenkinsRule jenkinsRule) throws Exception {
+        JNLPLauncher launcher = new JNLPLauncher();
+        launcher.setWebSocket(true);
+
+        ProxmoxCloud cloudA = new ProxmoxCloud(
+                "CloudA",
+                "https://proxmox.example.com:8006",
+                "proxmox-api-token",
+                false,
+                "pve",
+                "100",
+                "proxmox-agent",
+                2,
+                5,
+                5,
+                launcher,
+                "jenkins",
+                null,
+                "proxmox",
+                "/home/jenkins");
+
+        ProxmoxCloud cloudB = new ProxmoxCloud(
+                "CloudB",
+                "https://proxmox.example.com:8006",
+                "proxmox-api-token",
+                false,
+                "pve",
+                "100",
+                "proxmox-agent",
+                0,
+                5,
+                5,
+                launcher,
+                "jenkins",
+                null,
+                "proxmox",
+                "/home/jenkins");
+
+        assertEquals(0, cloudA.countLiveCloudNodes());
+
+        jenkinsRule.jenkins.addNode(buildDumbSlave(cloudA, "a-agent-1", "401", null));
+        jenkinsRule.jenkins.addNode(buildDumbSlave(cloudA, "a-agent-2", "402", null));
+        jenkinsRule.jenkins.addNode(buildDumbSlave(cloudB, "b-agent-1", "403", null));
+
+        // cloudA has 2 nodes, cloudB has 1; counts should not bleed across clouds.
+        assertEquals(2, cloudA.countLiveCloudNodes());
+        assertEquals(1, cloudB.countLiveCloudNodes());
+    }
+
+    @Test
+    @WithJenkins
+    public void testReconcileMinInstancesDoesNothingWhenAtOrAboveMinimum(JenkinsRule jenkinsRule) throws Exception {
+        JNLPLauncher launcher = new JNLPLauncher();
+        launcher.setWebSocket(true);
+
+        ProxmoxCloud minCloud = new ProxmoxCloud(
+                "ReconcileCloud",
+                "https://proxmox.example.com:8006",
+                "proxmox-api-token",
+                false,
+                "pve",
+                "100",
+                "proxmox-agent",
+                2,
+                5,
+                5,
+                launcher,
+                "jenkins",
+                null,
+                "proxmox",
+                "/home/jenkins");
+
+        jenkinsRule.jenkins.addNode(buildDumbSlave(minCloud, "r-agent-1", "501", null));
+        jenkinsRule.jenkins.addNode(buildDumbSlave(minCloud, "r-agent-2", "502", null));
+
+        assertEquals(2, minCloud.countLiveCloudNodes());
+
+        // reconcileMinInstances with 2 live nodes >= min 2 should return without provisioning.
+        // It would fail trying to connect to Proxmox if it actually tried to provision – so no exception = success.
+        minCloud.reconcileMinInstances();
+
+        // Count is unchanged.
+        assertEquals(2, minCloud.countLiveCloudNodes());
+    }
+
     private void addSecretTextCredential(JenkinsRule jenkinsRule, String id, String secret) throws Exception {
         StringCredentialsImpl credentials =
                 new StringCredentialsImpl(CredentialsScope.GLOBAL, id, "test credential", Secret.fromString(secret));
@@ -287,9 +494,10 @@ public class ProxmoxCloudTest {
                 .addCredentials(Domain.global(), credentials);
     }
 
-                    private DumbSlave buildDumbSlave(ProxmoxCloud cloud, String agentName, String vmId, String ipAddress) throws Exception {
-                        Method method = ProxmoxCloud.class.getDeclaredMethod("buildDumbSlave", String.class, String.class, String.class);
-                        method.setAccessible(true);
-                        return (DumbSlave) method.invoke(cloud, agentName, vmId, ipAddress);
-                    }
+    private DumbSlave buildDumbSlave(ProxmoxCloud cloud, String agentName, String vmId, String ipAddress)
+            throws Exception {
+        Method method = ProxmoxCloud.class.getDeclaredMethod("buildDumbSlave", String.class, String.class, String.class);
+        method.setAccessible(true);
+        return (DumbSlave) method.invoke(cloud, agentName, vmId, ipAddress);
+    }
 }

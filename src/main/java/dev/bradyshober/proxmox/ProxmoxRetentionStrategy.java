@@ -8,6 +8,8 @@ import java.io.IOException;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import jenkins.model.Jenkins;
+import org.kohsuke.stapler.DataBoundConstructor;
+import org.kohsuke.stapler.DataBoundSetter;
 
 /**
  * Retention strategy for Proxmox-provisioned agents.
@@ -23,13 +25,33 @@ public class ProxmoxRetentionStrategy extends RetentionStrategy<SlaveComputer> {
     /** Default idle timeout before the VM is terminated (5 minutes). */
     public static final int DEFAULT_IDLE_MINUTES = 5;
 
-    private final String cloudName;
-    private final String vmId;
-    private final int idleMinutes;
+    private String cloudName;
+    private String vmId;
+    private int idleMinutes;
+
+    @DataBoundConstructor
+    public ProxmoxRetentionStrategy() {
+        this(null, null, DEFAULT_IDLE_MINUTES);
+    }
 
     public ProxmoxRetentionStrategy(String cloudName, String vmId, int idleMinutes) {
         this.cloudName = cloudName;
         this.vmId = vmId;
+        this.idleMinutes = idleMinutes > 0 ? idleMinutes : DEFAULT_IDLE_MINUTES;
+    }
+
+    @DataBoundSetter
+    public void setCloudName(String cloudName) {
+        this.cloudName = cloudName;
+    }
+
+    @DataBoundSetter
+    public void setVmId(String vmId) {
+        this.vmId = vmId;
+    }
+
+    @DataBoundSetter
+    public void setIdleMinutes(int idleMinutes) {
         this.idleMinutes = idleMinutes > 0 ? idleMinutes : DEFAULT_IDLE_MINUTES;
     }
 
@@ -41,7 +63,7 @@ public class ProxmoxRetentionStrategy extends RetentionStrategy<SlaveComputer> {
     @Override
     public synchronized long check(SlaveComputer computer) {
         if (!computer.isIdle()) {
-            return 1; // Busy – check again in 1 minute
+            return 1; // Busy - check again in 1 minute
         }
 
         long idleMillis = System.currentTimeMillis() - computer.getIdleStartMilliseconds();
@@ -62,15 +84,29 @@ public class ProxmoxRetentionStrategy extends RetentionStrategy<SlaveComputer> {
             LOGGER.log(Level.WARNING, "Error disconnecting computer " + computer.getName(), e);
         }
 
-        // Locate the cloud and trigger VM termination
+        // Locate the cloud and trigger VM termination when provenance is known.
         Jenkins jenkinsInstance = Jenkins.getInstanceOrNull();
         if (jenkinsInstance != null) {
-            hudson.slaves.Cloud cloud = jenkinsInstance.clouds.getByName(cloudName);
-            if (cloud instanceof ProxmoxCloud proxmoxCloud) {
-                proxmoxCloud.terminateInstance(vmId);
-            } else {
-                LOGGER.log(Level.WARNING, "Could not find ProxmoxCloud '" + cloudName + "' for VM cleanup");
+            if (cloudName == null || cloudName.isBlank() || vmId == null || vmId.isBlank()) {
+                LOGGER.log(Level.WARNING, "Skipping VM termination because cloudName/vmId are not set on retention strategy");
+                return 1;
             }
+
+            hudson.slaves.Cloud cloud = jenkinsInstance.clouds.getByName(cloudName);
+            if (!(cloud instanceof ProxmoxCloud proxmoxCloud)) {
+                LOGGER.log(Level.WARNING, "Could not find ProxmoxCloud '" + cloudName + "' for VM cleanup");
+                return 1;
+            }
+
+            if (!proxmoxCloud.canTerminateVmForScaleDown(vmId)) {
+                LOGGER.log(
+                        Level.FINE,
+                        "Skipping idle termination for " + computer.getName()
+                                + " because cloud minimum instance floor is reached");
+                return 1;
+            }
+
+            proxmoxCloud.terminateInstance(vmId);
 
             // Remove the orphaned node from Jenkins
             try {
@@ -83,17 +119,13 @@ public class ProxmoxRetentionStrategy extends RetentionStrategy<SlaveComputer> {
             }
         }
 
-        return 0; // No more checks needed – node is being removed
+        return 0; // No more checks needed - node is being removed
     }
 
     @Override
     public void start(SlaveComputer computer) {
         computer.connect(false);
     }
-
-    // -------------------------------------------------------------------------
-    // Getters
-    // -------------------------------------------------------------------------
 
     public String getCloudName() {
         return cloudName;

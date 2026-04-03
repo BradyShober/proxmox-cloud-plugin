@@ -1,5 +1,6 @@
 package dev.bradyshober.proxmox;
 
+import hudson.slaves.ComputerLauncher;
 import java.io.Serial;
 import java.io.Serializable;
 
@@ -12,48 +13,36 @@ public class ProxmoxAgentTemplate implements Serializable {
 
     private String templateVmId;
     private String agentNameTemplate;
+    private int minInstances;
     private int maxInstances;
-    private LauncherStrategy launcherStrategy;
+    private ComputerLauncher launcher;
     private String sshUsername;
-    private String sshPrivateKey;
     private String sshPublicKey;
-    private int sshPort;
     private String labels;
-
-    public enum LauncherStrategy {
-        SSH("SSH"),
-        WEBSOCKET("WebSocket");
-
-        private final String displayName;
-
-        LauncherStrategy(String displayName) {
-            this.displayName = displayName;
-        }
-
-        public String getDisplayName() {
-            return displayName;
-        }
-    }
+    private String remoteFsRoot;
+    private int idleMinutesBeforeTermination;
 
     public ProxmoxAgentTemplate(
             String templateVmId,
             String agentNameTemplate,
+            int minInstances,
             int maxInstances,
-            LauncherStrategy launcherStrategy,
+            ComputerLauncher launcher,
             String sshUsername,
-            String sshPrivateKey,
             String sshPublicKey,
-            int sshPort,
-            String labels) {
+            String labels,
+            String remoteFsRoot,
+            int idleMinutesBeforeTermination) {
         this.templateVmId = templateVmId;
         this.agentNameTemplate = agentNameTemplate;
+        this.minInstances = minInstances;
         this.maxInstances = maxInstances;
-        this.launcherStrategy = launcherStrategy;
+        this.launcher = launcher;
         this.sshUsername = sshUsername;
-        this.sshPrivateKey = sshPrivateKey;
         this.sshPublicKey = sshPublicKey;
-        this.sshPort = sshPort;
         this.labels = labels;
+        this.remoteFsRoot = remoteFsRoot;
+        this.idleMinutesBeforeTermination = idleMinutesBeforeTermination;
     }
 
     public String getTemplateVmId() {
@@ -76,16 +65,24 @@ public class ProxmoxAgentTemplate implements Serializable {
         return maxInstances;
     }
 
+    public int getMinInstances() {
+        return minInstances;
+    }
+
+    public void setMinInstances(int minInstances) {
+        this.minInstances = minInstances;
+    }
+
     public void setMaxInstances(int maxInstances) {
         this.maxInstances = maxInstances;
     }
 
-    public LauncherStrategy getLauncherStrategy() {
-        return launcherStrategy;
+    public ComputerLauncher getLauncher() {
+        return launcher;
     }
 
-    public void setLauncherStrategy(LauncherStrategy launcherStrategy) {
-        this.launcherStrategy = launcherStrategy;
+    public void setLauncher(ComputerLauncher launcher) {
+        this.launcher = launcher;
     }
 
     public String getSshUsername() {
@@ -96,14 +93,6 @@ public class ProxmoxAgentTemplate implements Serializable {
         this.sshUsername = sshUsername;
     }
 
-    public String getSshPrivateKey() {
-        return sshPrivateKey;
-    }
-
-    public void setSshPrivateKey(String sshPrivateKey) {
-        this.sshPrivateKey = sshPrivateKey;
-    }
-
     public String getSshPublicKey() {
         return sshPublicKey;
     }
@@ -112,19 +101,27 @@ public class ProxmoxAgentTemplate implements Serializable {
         this.sshPublicKey = sshPublicKey;
     }
 
-    public int getSshPort() {
-        return sshPort;
-    }
-
-    public void setSshPort(int sshPort) {
-        this.sshPort = sshPort;
-    }
-
     public String getLabels() {
         return labels;
     }
 
     public void setLabels(String labels) {
         this.labels = labels;
+    }
+
+    public String getRemoteFsRoot() {
+        return remoteFsRoot;
+    }
+
+    public void setRemoteFsRoot(String remoteFsRoot) {
+        this.remoteFsRoot = remoteFsRoot;
+    }
+
+    public int getIdleMinutesBeforeTermination() {
+        return idleMinutesBeforeTermination;
+    }
+
+    public void setIdleMinutesBeforeTermination(int idleMinutesBeforeTermination) {
+        this.idleMinutesBeforeTermination = idleMinutesBeforeTermination;
     }
 }
