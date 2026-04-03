@@ -1,0 +1,854 @@
+package dev.bradyshober.proxmox;
+
+import com.cloudbees.plugins.credentials.CredentialsMatchers;
+import com.cloudbees.plugins.credentials.CredentialsProvider;
+import com.google.gson.Gson;
+import com.google.gson.JsonObject;
+import hudson.security.ACL;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.security.SecureRandom;
+import java.security.cert.X509Certificate;
+import java.util.Base64;
+import java.util.Collections;
+import java.util.concurrent.TimeUnit;
+import java.util.logging.Level;
+import java.util.logging.Logger;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.X509TrustManager;
+import jenkins.model.Jenkins;
+import okhttp3.FormBody;
+import okhttp3.MediaType;
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.RequestBody;
+import okhttp3.Response;
+import org.jenkinsci.plugins.plaincredentials.StringCredentials;
+
+/**
+ * Client wrapper for Proxmox VE REST API operations.
+ * Uses OkHttp3 for HTTP communication and Gson for JSON parsing.
+ */
+public class ProxmoxClient {
+    private static final Logger LOGGER = Logger.getLogger(ProxmoxClient.class.getName());
+    private static final Gson gson = new Gson();
+
+    private final ProxmoxServerConfig serverConfig;
+    private final OkHttpClient httpClient;
+    private final String nodeForVm; // MVP: single node assumption
+    private String authToken; // Session token from login
+
+    public ProxmoxClient(ProxmoxServerConfig serverConfig) throws IOException {
+        this.serverConfig = serverConfig;
+        this.nodeForVm = serverConfig.getNode();
+
+        // Create HTTP client with SSL verification control
+        OkHttpClient.Builder builder = new OkHttpClient.Builder()
+                .connectTimeout(30, TimeUnit.SECONDS)
+                .readTimeout(30, TimeUnit.SECONDS)
+                .writeTimeout(30, TimeUnit.SECONDS);
+
+        if (!serverConfig.isVerifySsl()) {
+            try {
+                // Create a trust manager that accepts all certificates
+                X509TrustManager trustAllCerts = new X509TrustManager() {
+                    @Override
+                    public void checkClientTrusted(X509Certificate[] chain, String authType) {}
+
+                    @Override
+                    public void checkServerTrusted(X509Certificate[] chain, String authType) {}
+
+                    @Override
+                    public X509Certificate[] getAcceptedIssuers() {
+                        return new X509Certificate[0];
+                    }
+                };
+
+                // Create SSLContext with the trust-all manager
+                SSLContext sslContext = SSLContext.getInstance("TLS");
+                sslContext.init(null, new TrustManager[] {trustAllCerts}, new SecureRandom());
+
+                // Apply to OkHttp client
+                builder.sslSocketFactory(sslContext.getSocketFactory(), trustAllCerts)
+                        .hostnameVerifier((hostname, session) -> true);
+
+                LOGGER.log(
+                        Level.WARNING, "SSL verification disabled for Proxmox API - only use in development/testing");
+            } catch (Exception e) {
+                LOGGER.log(Level.SEVERE, "Failed to disable SSL verification", e);
+                throw new IOException("Failed to configure SSL bypass", e);
+            }
+        }
+
+        this.httpClient = builder.build();
+
+        // Authenticate with API token
+        authenticate();
+    }
+
+    /**
+     * Authenticate with Proxmox using API token and verify connectivity.
+     */
+    private void authenticate() throws IOException {
+        String apiToken = resolveApiToken(serverConfig.getApiTokenCredentialId());
+
+        // Trim whitespace/newlines that may have been introduced during copy-paste into credential
+        apiToken = apiToken.strip();
+
+        // Guard against the user storing the full "PVEAPIToken=..." value in the credential
+        if (apiToken.startsWith("PVEAPIToken=")) {
+            LOGGER.log(
+                    Level.WARNING,
+                    "API token credential appears to already contain the 'PVEAPIToken=' prefix - using as-is");
+            this.authToken = apiToken;
+        } else {
+            // Token format: PVEAPIToken=userid@pam!tokenid=token-secret
+            this.authToken = "PVEAPIToken=" + apiToken;
+        }
+
+        LOGGER.log(
+                Level.FINE,
+                "Proxmox client initialized with API token credential ID: " + serverConfig.getApiTokenCredentialId());
+
+        // Verify connectivity and authentication immediately with a lightweight call
+        verifyAuthentication();
+    }
+
+    /**
+     * Verify that the configured API token can actually authenticate against Proxmox
+     * by calling the lightweight /api2/json/version endpoint.
+     */
+    private void verifyAuthentication() throws IOException {
+        String versionUrl = serverConfig.getHost() + "/api2/json/version";
+        Request request = new Request.Builder()
+                .url(versionUrl)
+                .get()
+                .addHeader("Authorization", authToken)
+                .build();
+
+        try (Response response = httpClient.newCall(request).execute()) {
+            if (response.code() == 401) {
+                okhttp3.ResponseBody errorBody = response.body();
+                String detail = errorBody != null ? errorBody.string() : "";
+                throw new IOException("Proxmox API authentication failed (HTTP 401). "
+                        + "Check that the secret text credential contains only the token value "
+                        + "in the format 'userid@pam!tokenid=secret' (without the 'PVEAPIToken=' prefix). "
+                        + "Proxmox response: " + detail);
+            }
+            if (!response.isSuccessful()) {
+                okhttp3.ResponseBody errorBody = response.body();
+                String detail = errorBody != null ? errorBody.string() : "";
+                throw new IOException("Proxmox API connectivity check failed with HTTP " + response.code());
+            }
+            LOGGER.log(
+                    Level.INFO, "Proxmox API authentication verified successfully against " + serverConfig.getHost());
+        }
+    }
+
+    static String resolveApiToken(String credentialId) throws IOException {
+        if (credentialId == null || credentialId.isBlank()) {
+            throw new IOException("A Proxmox API token credential must be configured");
+        }
+
+        Jenkins jenkins = Jenkins.getInstanceOrNull();
+        if (jenkins == null) {
+            throw new IOException("Jenkins instance is not available to resolve Proxmox credentials");
+        }
+
+        StringCredentials credentials = CredentialsMatchers.firstOrNull(
+                CredentialsProvider.lookupCredentialsInItemGroup(
+                        StringCredentials.class, jenkins, ACL.SYSTEM2, Collections.emptyList()),
+                CredentialsMatchers.withId(credentialId));
+
+        if (credentials == null) {
+            throw new IOException("Unable to find secret text credential with ID: " + credentialId);
+        }
+
+        return credentials.getSecret().getPlainText();
+    }
+
+    /**
+     * Get the next available VM ID from Proxmox cluster.
+     * Proxmox VM IDs must be positive integers; this avoids conflicts with existing VMs.
+     *
+     * @return next available VM ID as an integer string
+     * @throws Exception if the query fails
+     */
+    public String getNextVmId() throws Exception {
+        String path = serverConfig.getHost() + "/api2/json/cluster/nextid";
+        Request request = new Request.Builder()
+                .url(path)
+                .get()
+                .addHeader("Authorization", authToken)
+                .build();
+
+        try (Response response = httpClient.newCall(request).execute()) {
+            if (!response.isSuccessful()) {
+                okhttp3.ResponseBody errorBody = response.body();
+                String detail = errorBody != null ? errorBody.string() : "";
+                throw new IOException("Failed to get next VM ID: HTTP " + response.code());
+            }
+            okhttp3.ResponseBody body = response.body();
+            String responseBody = body != null ? body.string() : "{}";
+            JsonObject json = gson.fromJson(responseBody, JsonObject.class);
+            if (json != null && json.has("data")) {
+                return json.get("data").getAsString();
+            }
+            throw new IOException("No data returned from /cluster/nextid");
+        }
+    }
+
+    /**
+     * Clone a VM from a template.
+     *
+     * <p>Cloud-init user-data (packages, bootstrap script) cannot be injected at clone time via
+     * the Proxmox REST API — the {@code /upload} endpoint rejects {@code content=snippets}, and the
+     * {@code /content} endpoint is a disk-creation API. The JNLP connection command is therefore
+     * written to the guest post-boot via the QEMU guest agent; see
+     * {@link #writeFileViaGuestAgent} and {@link #execCommandViaGuestAgent}.
+     *
+     * @param sourceVmId      Template VM ID to clone from
+     * @param newVmId         New VM ID to create
+     * @param newVmName       Hostname for the new VM
+     * @param cloudInitScript Ignored — kept for API compatibility
+     * @return UPID task ID for tracking the operation
+     * @throws Exception if the clone operation fails
+     */
+    public String cloneVmWithCloudInit(String sourceVmId, String newVmId, String newVmName, String cloudInitScript)
+            throws Exception {
+        String path =
+                String.format("%s/api2/json/nodes/%s/qemu/%s/clone", serverConfig.getHost(), nodeForVm, sourceVmId);
+        FormBody.Builder bodyBuilder = new FormBody.Builder()
+                .add("newid", newVmId)
+                .add("name", newVmName)
+                .add("full", "1");
+
+        return postRequest(path, bodyBuilder.build());
+    }
+
+    // -------------------------------------------------------------------------
+    // QEMU guest-agent helpers
+    // -------------------------------------------------------------------------
+
+    /**
+     * Block until the QEMU guest agent is responsive inside {@code vmId}.
+     * Polls the {@code /agent/ping} endpoint every 5 seconds for up to 5 minutes.
+     *
+     * @throws Exception if the agent does not respond within the timeout
+     */
+    public void waitForGuestAgent(String vmId) throws Exception {
+        String path =
+                String.format("%s/api2/json/nodes/%s/qemu/%s/agent/ping", serverConfig.getHost(), nodeForVm, vmId);
+        int maxAttempts = 60; // 5 minutes
+        for (int attempt = 0; attempt < maxAttempts; attempt++) {
+            Request request = new Request.Builder()
+                    .url(path)
+                    .post(new FormBody.Builder().build())
+                    .addHeader("Authorization", authToken)
+                    .build();
+            try (Response response = httpClient.newCall(request).execute()) {
+                if (response.isSuccessful()) {
+                    LOGGER.log(Level.FINE, "QEMU guest agent is ready for VM " + vmId);
+                    return;
+                }
+            } catch (IOException e) {
+                LOGGER.log(Level.FINE, "Guest agent ping attempt " + (attempt + 1) + ": " + e.getMessage());
+            }
+            LOGGER.log(Level.FINE, "Waiting for guest agent (attempt " + (attempt + 1) + "/" + maxAttempts + ")");
+            Thread.sleep(5000);
+        }
+        throw new Exception("QEMU guest agent not available for VM " + vmId + " within timeout");
+    }
+
+    /**
+     * Write {@code content} to {@code filePath} inside the guest via the QEMU guest agent.
+     * Content is base64-encoded before transmission.
+     *
+     * @param vmId     target VM
+     * @param filePath absolute path inside the guest (e.g. {@code /etc/systemd/system/foo.service})
+     * @param content  text content to write
+     * @throws Exception if the operation fails
+     */
+    public void writeFileViaGuestAgent(String vmId, String filePath, String content) throws Exception {
+        String path = String.format(
+                "%s/api2/json/nodes/%s/qemu/%s/agent/file-write", serverConfig.getHost(), nodeForVm, vmId);
+        IOException firstError = null;
+
+        // Some Proxmox/QGA combinations accept plain text directly.
+        try {
+            writeGuestAgentFile(path, filePath, content, false);
+            LOGGER.log(Level.FINE, "Wrote " + filePath + " to VM " + vmId + " via guest agent (plain)");
+            return;
+        } catch (IOException e) {
+            firstError = e;
+            LOGGER.log(Level.FINE, "Plain guest-agent file-write failed, retrying with base64 encoding: " + e.getMessage());
+        }
+
+        // Fallback for environments that require encoded payloads.
+        String encoded = Base64.getEncoder().encodeToString(content.getBytes(StandardCharsets.UTF_8));
+        try {
+            writeGuestAgentFile(path, filePath, encoded, true);
+            LOGGER.log(Level.FINE, "Wrote " + filePath + " to VM " + vmId + " via guest agent (base64)");
+            return;
+        } catch (IOException secondError) {
+            throw new IOException(
+                    "guest-agent file-write to "
+                            + filePath
+                            + " failed in plain and base64 modes. first="
+                            + firstError.getMessage()
+                            + ", second="
+                            + secondError.getMessage(),
+                    secondError);
+        }
+    }
+
+    private void writeGuestAgentFile(String path, String filePath, String content, boolean encoded) throws IOException {
+        FormBody.Builder form = new FormBody.Builder().add("file", filePath).add("content", content);
+        if (encoded) {
+            form.add("encode", "1");
+        }
+
+        Request request = new Request.Builder()
+                .url(path)
+                .post(form.build())
+                .addHeader("Authorization", authToken)
+                .build();
+
+        try (Response response = httpClient.newCall(request).execute()) {
+            if (!response.isSuccessful()) {
+                okhttp3.ResponseBody respBody = response.body();
+                String msg = respBody != null ? respBody.string() : "";
+                throw new IOException(
+                        "HTTP " + response.code() + " " + msg);
+            }
+        }
+    }
+
+    /**
+     * Execute a command inside the guest via the QEMU guest agent and wait for it to finish.
+     * Command and arguments are sent as a JSON array to avoid shell-quoting issues.
+     *
+     * @param vmId          target VM
+     * @param commandAndArgs command followed by its arguments, e.g.
+     *                       {@code "systemctl", "enable", "--now", "jenkins-agent.service"}
+     * @throws Exception if the request fails or the command exits non-zero
+     */
+    public void execCommandViaGuestAgent(String vmId, String... commandAndArgs) throws Exception {
+        if (commandAndArgs == null || commandAndArgs.length == 0 || commandAndArgs[0] == null
+                || commandAndArgs[0].isBlank()) {
+            throw new IllegalArgumentException("commandAndArgs must include a non-empty command");
+        }
+
+        String path =
+                String.format("%s/api2/json/nodes/%s/qemu/%s/agent/exec", serverConfig.getHost(), nodeForVm, vmId);
+
+        int pid = startGuestAgentExec(vmId, path, commandAndArgs);
+
+        // Poll exec-status until the process exits
+        String statusPath = String.format(
+                "%s/api2/json/nodes/%s/qemu/%s/agent/exec-status?pid=%d", serverConfig.getHost(), nodeForVm, vmId, pid);
+        int maxAttempts = 60;
+        for (int attempt = 0; attempt < maxAttempts; attempt++) {
+            Request statusReq = new Request.Builder()
+                    .url(statusPath)
+                    .get()
+                    .addHeader("Authorization", authToken)
+                    .build();
+            try (Response response = httpClient.newCall(statusReq).execute()) {
+                if (response.isSuccessful()) {
+                    okhttp3.ResponseBody respBody = response.body();
+                    String responseBody = respBody != null ? respBody.string() : "{}";
+                    JsonObject json = gson.fromJson(responseBody, JsonObject.class);
+                    if (json != null && json.has("data")) {
+                        JsonObject data = json.getAsJsonObject("data");
+                        if (data.has("exited") && data.get("exited").getAsInt() == 1) {
+                            int exitCode =
+                                    data.has("exitcode") ? data.get("exitcode").getAsInt() : 0;
+                            String cmd = String.join(" ", commandAndArgs);
+                            if (exitCode != 0) {
+                                String stdErr = decodeExecDataField(data, "err-data");
+                                String stdOut = decodeExecDataField(data, "out-data");
+                                throw new IOException("Guest-agent command failed (exit " + exitCode + "): " + cmd
+                                        + (stdErr.isBlank() ? "" : " | stderr: " + stdErr)
+                                        + (stdOut.isBlank() ? "" : " | stdout: " + stdOut));
+                            }
+
+                            String stdErr = decodeExecDataField(data, "err-data");
+                            if (!stdErr.isBlank()) {
+                                LOGGER.log(Level.FINE, "Guest-agent stderr for '" + cmd + "': " + stdErr);
+                            }
+                            LOGGER.log(Level.FINE, "Guest-agent command OK: " + cmd);
+                            return;
+                        }
+                    }
+                }
+            }
+            Thread.sleep(2000);
+        }
+        LOGGER.log(Level.WARNING, "Guest-agent command timed out: " + String.join(" ", commandAndArgs));
+        throw new IOException("Guest-agent command timed out: " + String.join(" ", commandAndArgs));
+    }
+
+    private int startGuestAgentExec(String vmId, String path, String... commandAndArgs) throws IOException {
+        final int maxAttempts = 4;
+        String cmd = toLegacyCommandLine(commandAndArgs);
+
+        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            com.google.gson.JsonArray commandArray = new com.google.gson.JsonArray();
+            for (String part : commandAndArgs) {
+                commandArray.add(part);
+            }
+
+            JsonObject payload = new JsonObject();
+            payload.add("command", commandArray);
+            RequestBody body = RequestBody.create(payload.toString(), MediaType.get("application/json"));
+            Request request = new Request.Builder()
+                    .url(path)
+                    .post(body)
+                    .addHeader("Authorization", authToken)
+                    .build();
+
+            try (Response response = httpClient.newCall(request).execute()) {
+                okhttp3.ResponseBody respBody = response.body();
+                String responseBody = respBody != null ? respBody.string() : "";
+
+                if (!response.isSuccessful()) {
+                    if (response.code() == 596 && attempt < maxAttempts) {
+                        boolean pingOk = isGuestAgentPingSuccessful(vmId);
+                        LOGGER.log(
+                                Level.FINE,
+                                "guest-agent exec returned HTTP 596 for VM " + vmId + " (attempt " + attempt + "/"
+                                        + maxAttempts + ", ping=" + pingOk + ") for command: " + cmd);
+                        sleepBeforeRetry(attempt);
+                        continue;
+                    }
+
+                    throw new IOException(
+                            "guest-agent exec failed (command='" + cmd + "', attempt=" + attempt + "/" + maxAttempts
+                                    + "): HTTP " + response.code() + " " + responseBody);
+                }
+
+                JsonObject json = gson.fromJson(responseBody.isBlank() ? "{}" : responseBody, JsonObject.class);
+                if (json == null || !json.has("data") || !json.getAsJsonObject("data").has("pid")) {
+                    throw new IOException("No pid returned from guest-agent exec");
+                }
+                return json.getAsJsonObject("data").get("pid").getAsInt();
+            }
+        }
+
+        throw new IOException("guest-agent exec failed after retries for command: " + cmd);
+    }
+
+    private void sleepBeforeRetry(int attempt) throws IOException {
+        try {
+            Thread.sleep(1000L * attempt * 2L);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IOException("Interrupted while retrying guest-agent exec", e);
+        }
+    }
+
+    private boolean isGuestAgentPingSuccessful(String vmId) {
+        String pingPath = String.format(
+                "%s/api2/json/nodes/%s/qemu/%s/agent/ping", serverConfig.getHost(), nodeForVm, vmId);
+        Request request = new Request.Builder()
+                .url(pingPath)
+                .post(new FormBody.Builder().build())
+                .addHeader("Authorization", authToken)
+                .build();
+        try (Response response = httpClient.newCall(request).execute()) {
+            return response.isSuccessful();
+        } catch (IOException e) {
+            LOGGER.log(Level.FINE, "guest-agent ping probe failed for VM " + vmId + ": " + e.getMessage());
+            return false;
+        }
+    }
+
+
+    private String toLegacyCommandLine(String... commandAndArgs) {
+        StringBuilder command = new StringBuilder();
+        for (int i = 0; i < commandAndArgs.length; i++) {
+            if (i > 0) {
+                command.append(' ');
+            }
+            command.append(commandAndArgs[i]);
+        }
+        return command.toString();
+    }
+
+
+    private String decodeExecDataField(JsonObject data, String fieldName) {
+        if (data == null || !data.has(fieldName) || data.get(fieldName).isJsonNull()) {
+            return "";
+        }
+        String base64 = data.get(fieldName).getAsString();
+        if (base64.isBlank()) {
+            return "";
+        }
+        try {
+            return new String(Base64.getDecoder().decode(base64), StandardCharsets.UTF_8).strip();
+        } catch (IllegalArgumentException e) {
+            return base64;
+        }
+    }
+
+    /**
+     * Start a VM.
+     *
+     * @param vmId VM ID to start
+     * @return UPID task ID for tracking the operation
+     * @throws Exception if the start operation fails
+     */
+    public String startVm(String vmId) throws Exception {
+        String path =
+                String.format("%s/api2/json/nodes/%s/qemu/%s/status/start", serverConfig.getHost(), nodeForVm, vmId);
+
+        return postRequest(path, new FormBody.Builder().build());
+    }
+
+    /**
+     * Stop a VM.
+     *
+     * @param vmId VM ID to stop
+     * @return UPID task ID for tracking the operation
+     * @throws Exception if the stop operation fails
+     */
+    public String stopVm(String vmId) throws Exception {
+        String path =
+                String.format("%s/api2/json/nodes/%s/qemu/%s/status/stop", serverConfig.getHost(), nodeForVm, vmId);
+
+        return postRequest(path, new FormBody.Builder().build());
+    }
+
+    /**
+     * Delete a VM.
+     *
+     * @param vmId VM ID to delete
+     * @return UPID task ID for tracking the operation
+     * @throws Exception if the delete operation fails
+     */
+    public String deleteVm(String vmId) throws Exception {
+        String path = String.format("%s/api2/json/nodes/%s/qemu/%s", serverConfig.getHost(), nodeForVm, vmId);
+
+        Request request = new Request.Builder()
+                .url(path)
+                .delete()
+                .addHeader("Authorization", authToken)
+                .build();
+
+        try (Response response = httpClient.newCall(request).execute()) {
+            if (!response.isSuccessful()) {
+                okhttp3.ResponseBody body = response.body();
+                String responseBody = body != null ? body.string() : "";
+                throw new IOException("HTTP " + response.code() + ": " + responseBody);
+            }
+
+            okhttp3.ResponseBody body = response.body();
+            String responseBody = body != null ? body.string() : "{}";
+            JsonObject jsonResponse = gson.fromJson(responseBody, JsonObject.class);
+
+            if (jsonResponse != null && jsonResponse.has("data")) {
+                return jsonResponse.get("data").getAsString();
+            }
+            throw new Exception("No UPID returned from delete operation");
+        }
+    }
+
+    /**
+     * Poll a task by UPID to check completion status.
+     *
+     * @param upid UPID task identifier
+     * @return true if task is complete, false if still running
+     * @throws Exception if the query fails
+     */
+    public boolean isTaskComplete(String upid) throws Exception {
+        // Parse UPID to extract node and task ID
+        // Format: UPID:node:pid:starttime:type:id:user
+        String[] parts = upid.split(":");
+        if (parts.length < 7) {
+            throw new IllegalArgumentException("Invalid UPID format: " + upid);
+        }
+        String node = parts[1];
+
+        String path = String.format("%s/api2/json/nodes/%s/tasks/%s/status", serverConfig.getHost(), node, upid);
+
+        Request request = new Request.Builder()
+                .url(path)
+                .get()
+                .addHeader("Authorization", authToken)
+                .build();
+
+        try (Response response = httpClient.newCall(request).execute()) {
+            if (!response.isSuccessful()) {
+                okhttp3.ResponseBody body = response.body();
+                String responseBody = body != null ? body.string() : "";
+                LOGGER.log(
+                        Level.FINE,
+                        "Failed to get task status for " + upid + ": HTTP " + response.code() + " " + responseBody);
+                return false;
+            }
+
+            okhttp3.ResponseBody body = response.body();
+            String responseBody = body != null ? body.string() : "{}";
+            JsonObject jsonResponse = gson.fromJson(responseBody, JsonObject.class);
+
+            if (jsonResponse != null && jsonResponse.has("data")) {
+                JsonObject data = jsonResponse.getAsJsonObject("data");
+                String status = data.has("status") && !data.get("status").isJsonNull()
+                        ? data.get("status").getAsString()
+                        : "unknown";
+                String exitStatus =
+                        data.has("exitstatus") && !data.get("exitstatus").isJsonNull()
+                                ? data.get("exitstatus").getAsString()
+                                : "null";
+                String endTime = data.has("endtime") && !data.get("endtime").isJsonNull()
+                        ? data.get("endtime").getAsString()
+                        : "null";
+                LOGGER.log(Level.FINE, "Task status for {0}: status={1}, exitstatus={2}, endtime={3}", new Object[] {
+                    upid, status, exitStatus, endTime
+                });
+                return isCompletedTaskStatus(data);
+            }
+            LOGGER.log(Level.FINE, "Task status for " + upid + ": response contained no data block");
+            return false;
+        }
+    }
+
+    /**
+     * Determine whether a Proxmox task status payload represents a finished task.
+     *
+     * <p>Most tasks report completion through a non-null {@code endtime}. Some Proxmox
+     * installations instead report terminal success as {@code status=stopped} with
+     * {@code exitstatus=OK} while leaving {@code endtime} null. This helper treats both
+     * shapes as complete.
+     */
+    static boolean isCompletedTaskStatus(JsonObject data) {
+        if (data == null) {
+            return false;
+        }
+
+        if (data.has("endtime") && !data.get("endtime").isJsonNull()) {
+            return true;
+        }
+
+        String status = data.has("status") && !data.get("status").isJsonNull()
+                ? data.get("status").getAsString()
+                : null;
+        String exitStatus = data.has("exitstatus") && !data.get("exitstatus").isJsonNull()
+                ? data.get("exitstatus").getAsString()
+                : null;
+
+        return "stopped".equalsIgnoreCase(status) && "OK".equalsIgnoreCase(exitStatus);
+    }
+
+    /**
+     * Make a POST request to the Proxmox API.
+     */
+    private String postRequest(String path, okhttp3.RequestBody body) throws IOException {
+        Request request = new Request.Builder()
+                .url(path)
+                .post(body)
+                .addHeader("Authorization", authToken)
+                .build();
+
+        LOGGER.log(Level.FINE, "POST request to: " + path);
+
+        try (Response response = httpClient.newCall(request).execute()) {
+            if (!response.isSuccessful()) {
+                okhttp3.ResponseBody errorBody = response.body();
+                String errorMessage = errorBody != null ? errorBody.string() : "";
+                LOGGER.log(Level.WARNING, "API request failed with HTTP " + response.code() + ": " + errorMessage);
+                if (response.code() == 401) {
+                    LOGGER.log(
+                            Level.WARNING,
+                            "Authentication failed (HTTP 401) - Verify API token credential is correct and properly formatted (userid@pam!tokenid=secret)");
+                }
+                if (response.code() == 403) {
+                    LOGGER.log(
+                            Level.WARNING,
+                            "Permission denied (HTTP 403) - API tokens in Proxmox have 'Privilege Separation' enabled by default. "
+                                    + "Fix: In Proxmox go to Datacenter → Permissions → API Tokens → edit your token → uncheck 'Privilege Separation'. "
+                                    + "Alternatively, assign the PVEAdmin role directly to the token under Datacenter → Permissions → Add → API Token Permission.");
+                }
+                throw new IOException("HTTP " + response.code() + ": " + errorMessage);
+            }
+
+            okhttp3.ResponseBody respBody = response.body();
+            String responseBody = respBody != null ? respBody.string() : "{}";
+            JsonObject jsonResponse = gson.fromJson(responseBody, JsonObject.class);
+
+            if (jsonResponse != null && jsonResponse.has("data")) {
+                return jsonResponse.get("data").getAsString();
+            }
+            throw new IOException("No UPID returned from API call");
+        }
+    }
+
+    /**
+     * Wait for and return the first non-loopback IPv4 address of a running VM via the QEMU
+     * guest agent network-get-interfaces API. Polls every 5 seconds for up to 5 minutes.
+     *
+     * @param vmId VM ID to query
+     * @return first non-loopback IPv4 address
+     * @throws Exception if the address cannot be resolved within the timeout
+     */
+    public String getVmIpAddress(String vmId) throws Exception {
+        String path = String.format(
+                "%s/api2/json/nodes/%s/qemu/%s/agent/network-get-interfaces", serverConfig.getHost(), nodeForVm, vmId);
+
+        int maxAttempts = 60; // 5 minutes with 5-second polls
+        for (int attempt = 0; attempt < maxAttempts; attempt++) {
+            Request request = new Request.Builder()
+                    .url(path)
+                    .get()
+                    .addHeader("Authorization", authToken)
+                    .build();
+
+            try (Response response = httpClient.newCall(request).execute()) {
+                if (response.isSuccessful()) {
+                    okhttp3.ResponseBody body = response.body();
+                    String responseBody = body != null ? body.string() : "{}";
+                    JsonObject json = gson.fromJson(responseBody, JsonObject.class);
+                    String ip = extractFirstIpv4(json);
+                    if (ip != null) {
+                        LOGGER.log(Level.FINE, "VM " + vmId + " IP address resolved: " + ip);
+                        return ip;
+                    }
+                }
+            } catch (IOException e) {
+                LOGGER.log(Level.FINE, "Guest agent not ready (attempt " + (attempt + 1) + "): " + e.getMessage());
+            }
+
+            LOGGER.log(Level.FINE, "Waiting for VM IP address (attempt " + (attempt + 1) + "/" + maxAttempts + ")");
+            Thread.sleep(5000);
+        }
+
+        throw new Exception("VM " + vmId + " did not report an IP address within timeout");
+    }
+
+    /**
+     * Parse the first non-loopback IPv4 address from a Proxmox guest-agent
+     * network-get-interfaces response.
+     */
+    private String extractFirstIpv4(JsonObject json) {
+        if (json == null || !json.has("data")) return null;
+        JsonObject data = json.getAsJsonObject("data");
+        if (!data.has("result")) return null;
+
+        com.google.gson.JsonArray interfaces = data.getAsJsonArray("result");
+        for (com.google.gson.JsonElement elem : interfaces) {
+            JsonObject iface = elem.getAsJsonObject();
+            String name = iface.has("name") ? iface.get("name").getAsString() : "";
+            if ("lo".equals(name)) continue;
+            if (!iface.has("ip-addresses")) continue;
+
+            for (com.google.gson.JsonElement ipElem : iface.getAsJsonArray("ip-addresses")) {
+                JsonObject ipObj = ipElem.getAsJsonObject();
+                String type = ipObj.has("ip-address-type")
+                        ? ipObj.get("ip-address-type").getAsString()
+                        : "";
+                if ("ipv4".equals(type) && ipObj.has("ip-address")) {
+                    String addr = ipObj.get("ip-address").getAsString();
+                    if (!addr.startsWith("127.")) {
+                        return addr;
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Apply cloud-init parameters to a cloned VM via the Proxmox VM config API.
+     *
+     * <p>Sets {@code ciuser}, {@code sshkeys}, and {@code ipconfig0=dhcp} in a single
+     * {@code PUT .../config} call. Proxmox runs this asynchronously when it needs to regenerate
+     * the cloud-init ISO, returning a task UPID and locking the VM. This method waits for that
+     * task to finish before returning so that the caller can safely start the VM afterward.
+     *
+     * @param vmId         VM ID to configure
+     * @param ciUser       Linux username to create via cloud-init (e.g. {@code jenkins})
+     * @param sshPublicKey SSH public key content (e.g. {@code ssh-rsa AAAA... user@host})
+     * @throws Exception if the configuration request or task wait fails
+     */
+    public void configureVmCloudInit(String vmId, String ciUser, String sshPublicKey) throws Exception {
+        String path = String.format("%s/api2/json/nodes/%s/qemu/%s/config", serverConfig.getHost(), nodeForVm, vmId);
+
+        FormBody.Builder bodyBuilder = new FormBody.Builder();
+
+        if (ciUser != null && !ciUser.isBlank()) {
+            bodyBuilder.add("ciuser", ciUser.trim());
+        }
+
+        if (sshPublicKey != null && !sshPublicKey.isBlank()) {
+            String encodedKey =
+                    java.net.URLEncoder.encode(sshPublicKey.trim(), java.nio.charset.StandardCharsets.UTF_8);
+            bodyBuilder.add("sshkeys", encodedKey);
+        }
+
+        // Always request DHCP on the primary NIC so the VM gets a routable IP
+        bodyBuilder.add("ipconfig0", "ip=dhcp");
+
+        // PUT /config is asynchronous when Proxmox regenerates the cloud-init ISO.
+        // It returns a task UPID and locks the VM; we must wait for the task before
+        // calling startVm(), otherwise the start will fail with "VM is locked".
+        String taskUpid = putRequestReturningTask(path, bodyBuilder.build());
+        if (taskUpid != null && !taskUpid.isBlank()) {
+            LOGGER.log(Level.FINE, "Waiting for cloud-init config task " + taskUpid + " on VM " + vmId);
+            waitForTask(taskUpid);
+        }
+        LOGGER.log(Level.FINE, "Configured cloud-init params (ciuser, sshkeys, ipconfig0) for VM " + vmId);
+    }
+
+    /**
+     * PUT request that captures and returns the task UPID from the response body (or {@code null}
+     * for synchronous responses where {@code data} is {@code null}).
+     */
+    private String putRequestReturningTask(String path, okhttp3.RequestBody body) throws IOException {
+        Request request = new Request.Builder()
+                .url(path)
+                .put(body)
+                .addHeader("Authorization", authToken)
+                .build();
+
+        try (Response response = httpClient.newCall(request).execute()) {
+            if (!response.isSuccessful()) {
+                okhttp3.ResponseBody errorBody = response.body();
+                String errorMessage = errorBody != null ? errorBody.string() : "";
+                throw new IOException("PUT " + path + " failed with HTTP " + response.code() + ": " + errorMessage);
+            }
+            okhttp3.ResponseBody respBody = response.body();
+            String responseBody = respBody != null ? respBody.string() : "{}";
+            JsonObject json = gson.fromJson(responseBody, JsonObject.class);
+            if (json != null && json.has("data") && !json.get("data").isJsonNull()) {
+                return json.get("data").getAsString();
+            }
+            return null; // synchronous update, no background task
+        }
+    }
+
+    /**
+     * Poll a task UPID until it finishes (up to 5 minutes).
+     *
+     * @throws Exception if the task does not complete within the timeout
+     */
+    private void waitForTask(String upid) throws Exception {
+        int maxAttempts = 60; // 5 minutes at 5-second intervals
+        for (int attempt = 0; attempt < maxAttempts; attempt++) {
+            if (isTaskComplete(upid)) {
+                return;
+            }
+            Thread.sleep(5000);
+        }
+        throw new Exception("Timed out waiting for task: " + upid);
+    }
+
+
+    /**
+     * Close the client connection.
+     */
+    public void close() {
+        httpClient.dispatcher().executorService().shutdown();
+    }
+}

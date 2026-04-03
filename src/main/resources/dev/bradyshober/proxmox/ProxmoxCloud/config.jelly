@@ -1,0 +1,61 @@
+<?jelly escape-by-default='true'?>
+<j:jelly xmlns:j="jelly:core" xmlns:st="jelly:stapler" xmlns:d="jelly:define" xmlns:l="/lib/layout" xmlns:t="/lib/hudson" xmlns:f="/lib/form" xmlns:c="/lib/credentials">
+
+    <f:entry title="${%Cloud Name}" field="name">
+        <f:textbox placeholder="proxmox-cloud"/>
+    </f:entry>
+
+    <f:entry title="${%Proxmox Host}" field="host">
+        <f:textbox placeholder="https://proxmox.example.com:8006"/>
+    </f:entry>
+
+    <f:entry title="${%Proxmox Node Name}" field="node">
+        <f:textbox placeholder="pve"/>
+    </f:entry>
+
+    <f:entry title="${%API Token Credential}" field="apiTokenCredentialId">
+        <c:select/>
+    </f:entry>
+
+    <f:entry title="${%Verify SSL Certificate}" field="verifySsl">
+        <f:checkbox default="true"/>
+    </f:entry>
+
+    <f:entry title="${%Template VM ID}" field="templateVmId">
+        <f:textbox placeholder="100"/>
+    </f:entry>
+
+    <f:entry title="${%Agent Name Template}" field="agentNameTemplate">
+        <f:textbox default="proxmox-agent" placeholder="proxmox-agent"/>
+    </f:entry>
+
+    <f:entry title="${%Max Instances}" field="maxInstances">
+        <f:number default="5"/>
+    </f:entry>
+
+    <f:entry title="${%Launcher Strategy}" field="launcherStrategy">
+        <f:select/>
+    </f:entry>
+
+    <f:entry title="${%SSH Username}" field="sshUsername">
+        <f:textbox default="jenkins" placeholder="jenkins"/>
+    </f:entry>
+
+    <f:entry title="${%SSH Port}" field="sshPort">
+        <f:number default="22"/>
+    </f:entry>
+
+    <f:entry title="${%SSH Private Key Path}" field="sshPrivateKey">
+        <f:textbox placeholder="/home/jenkins/.ssh/id_rsa"/>
+    </f:entry>
+
+    <f:entry title="${%SSH Public Key for cloud-init}" field="sshPublicKey">
+        <f:textarea placeholder="ssh-rsa AAAA... jenkins@controller"/>
+    </f:entry>
+
+    <f:entry title="${%Agent Labels}" field="labels">
+        <f:textbox default="proxmox" placeholder="proxmox linux docker"/>
+    </f:entry>
+
+</j:jelly>
+

@@ -9,12 +9,12 @@
     <relativePath />
   </parent>
 
-  <groupId>io.jenkins.plugins</groupId>
+  <groupId>dev.bradyshober</groupId>
   <artifactId>proxmox-cloud</artifactId>
   <version>${revision}${changelist}</version>
   <packaging>hpi</packaging>
 
-  <name>TODO Plugin</name>
+  <name>Proxmox Cloud</name>
   <url>https://github.com/jenkinsci/${project.artifactId}-plugin</url>
   <licenses>
     <license>
@@ -41,6 +41,9 @@
     <ban-junit4-imports.skip>false</ban-junit4-imports.skip>
     <ban-commons-lang-2.skip>false</ban-commons-lang-2.skip>
     <hpi.strictBundledArtifacts>true</hpi.strictBundledArtifacts>
+
+    <!-- Bundled artifacts for HTTP client and JSON -->
+    <hpi.bundledArtifacts>annotations,gson,kotlin-stdlib,kotlin-stdlib-common,kotlin-stdlib-jdk7,kotlin-stdlib-jdk8,okhttp,okio,okio-jvm</hpi.bundledArtifacts>
   </properties>
 
   <dependencyManagement>
@@ -54,6 +57,46 @@
       </dependency>
     </dependencies>
   </dependencyManagement>
+
+  <dependencies>
+
+    <!-- JSON processing -->
+    <dependency>
+      <groupId>com.google.code.gson</groupId>
+      <artifactId>gson</artifactId>
+      <version>2.10.1</version>
+    </dependency>
+    <!-- HTTP Client for Proxmox REST API -->
+    <dependency>
+      <groupId>com.squareup.okhttp3</groupId>
+      <artifactId>okhttp</artifactId>
+      <version>4.11.0</version>
+    </dependency>
+
+    <!-- Jenkins credentials plugin -->
+    <dependency>
+      <groupId>org.jenkins-ci.plugins</groupId>
+      <artifactId>credentials</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.jenkins-ci.plugins</groupId>
+      <artifactId>plain-credentials</artifactId>
+    </dependency>
+
+    <!-- Jenkins Core (already in BOM, but explicit for clarity) -->
+    <dependency>
+      <groupId>org.jenkins-ci.main</groupId>
+      <artifactId>jenkins-core</artifactId>
+      <scope>provided</scope>
+    </dependency>
+
+    <!-- Testing -->
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
 
   <repositories>
     <repository>

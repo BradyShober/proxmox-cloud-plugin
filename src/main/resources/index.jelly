@@ -1,4 +1,6 @@
 <?jelly escape-by-default='true'?>
 <div>
-    TODO
+    This Jenkins plugin enables dynamic provisioning of build agents on Proxmox VE infrastructure.
+    VMs are cloned from a template, bootstrapped with cloud-init, and automatically registered as
+    Jenkins agents. Supports both SSH and WebSocket connectivity.
 </div>
