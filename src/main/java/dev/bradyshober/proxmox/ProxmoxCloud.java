@@ -30,7 +30,6 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 import jenkins.model.Jenkins;
 import jenkins.slaves.JnlpSlaveAgentProtocol;
-import org.jenkinsci.plugins.plaincredentials.StringCredentials;
 import org.kohsuke.stapler.DataBoundConstructor;
 import org.kohsuke.stapler.DataBoundSetter;
 import org.kohsuke.stapler.QueryParameter;
@@ -977,7 +976,7 @@ public class ProxmoxCloud extends Cloud {
             }
 
             return options.includeEmptyValue()
-                    .includeAs(ACL.SYSTEM2, jenkins, StringCredentials.class, Collections.emptyList())
+                    .includeAs(ACL.SYSTEM2, jenkins, ProxmoxApiTokenCredentials.class, Collections.emptyList())
                     .includeCurrentValue(apiTokenCredentialId);
         }
 
@@ -986,15 +985,28 @@ public class ProxmoxCloud extends Cloud {
             jenkins.checkPermission(Jenkins.ADMINISTER);
 
             if (value == null || value.isBlank()) {
-                return FormValidation.error("Select the secret text credential containing the Proxmox API token");
+                return FormValidation.error("Select a Proxmox API Token credential");
             }
 
-            StringCredentials credentials = CredentialsMatchers.firstOrNull(
+            ProxmoxApiTokenCredentials credentials = CredentialsMatchers.firstOrNull(
                     CredentialsProvider.lookupCredentialsInItemGroup(
-                            StringCredentials.class, jenkins, ACL.SYSTEM2, Collections.emptyList()),
+                            ProxmoxApiTokenCredentials.class, jenkins, ACL.SYSTEM2, Collections.emptyList()),
                     CredentialsMatchers.withId(value));
             if (credentials == null) {
-                return FormValidation.error("Credential not found or is not a secret text credential");
+                return FormValidation.error("Credential not found or is not a Proxmox API Token credential");
+            }
+
+            if (credentials.getUsername() == null || credentials.getUsername().isBlank()) {
+                return FormValidation.error("Credential username is required");
+            }
+            if (credentials.getRealm() == null || credentials.getRealm().isBlank()) {
+                return FormValidation.error("Credential login realm is required");
+            }
+            if (credentials.getTokenId() == null || credentials.getTokenId().isBlank()) {
+                return FormValidation.error("Credential token identifier is required");
+            }
+            if (credentials.getTokenSecret() == null || credentials.getTokenSecret().getPlainText().isBlank()) {
+                return FormValidation.error("Credential token secret is required");
             }
 
             return FormValidation.ok();

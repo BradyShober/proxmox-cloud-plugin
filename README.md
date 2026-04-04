@@ -9,7 +9,7 @@ This Jenkins plugin dynamically provisions build agents on Proxmox VE by cloning
 1. Configure Proxmox Cloud in Jenkins **Manage Jenkins** → **Configure System** → **Cloud**
 2. Add a Proxmox Cloud instance with:
    - **Proxmox Host**: URL of your Proxmox VE server (e.g., `https://proxmox.example.com:8006`)
-   - **API Token Credential**: Select a Jenkins **Secret text** credential containing the Proxmox API token value
+   - **Proxmox API Token Credential**: Select a Jenkins **Proxmox API Token** credential (username, realm, token identifier, token secret)
    - **Template VM ID**: The source VM template to clone from
    - **Instance Limits**: Maximum concurrent instances
    - **Launcher Strategy**: Choose SSH or WebSocket connectivity

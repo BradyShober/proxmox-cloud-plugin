@@ -1,0 +1,21 @@
+<?jelly escape-by-default='true'?>
+<j:jelly xmlns:j="jelly:core" xmlns:st="jelly:stapler" xmlns:f="/lib/form">
+    <st:include page="id-and-description.jelly" class="com.cloudbees.plugins.credentials.impl.BaseStandardCredentials"/>
+
+    <f:entry title="Proxmox Username" field="username">
+        <f:textbox placeholder="jenkins"/>
+    </f:entry>
+
+    <f:entry title="Login Realm" field="realm">
+        <f:select/>
+    </f:entry>
+
+    <f:entry title="Token Identifier" field="tokenId">
+        <f:textbox placeholder="jenkins-agent"/>
+    </f:entry>
+
+    <f:entry title="Token Secret" field="tokenSecret">
+        <f:password/>
+    </f:entry>
+</j:jelly>
+

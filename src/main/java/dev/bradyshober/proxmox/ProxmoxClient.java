@@ -24,7 +24,6 @@ import okhttp3.OkHttpClient;
 import okhttp3.Request;
 import okhttp3.RequestBody;
 import okhttp3.Response;
-import org.jenkinsci.plugins.plaincredentials.StringCredentials;
 
 /**
  * Client wrapper for Proxmox VE REST API operations.
@@ -132,8 +131,8 @@ public class ProxmoxClient {
                 okhttp3.ResponseBody errorBody = response.body();
                 String detail = errorBody != null ? errorBody.string() : "";
                 throw new IOException("Proxmox API authentication failed (HTTP 401). "
-                        + "Check that the secret text credential contains only the token value "
-                        + "in the format 'userid@pam!tokenid=secret' (without the 'PVEAPIToken=' prefix). "
+                        + "Check that the Proxmox API Token credential fields are correct "
+                        + "(username, realm, token identifier, token secret). "
                         + "Proxmox response: " + detail);
             }
             if (!response.isSuccessful()) {
@@ -156,17 +155,27 @@ public class ProxmoxClient {
             throw new IOException("Jenkins instance is not available to resolve Proxmox credentials");
         }
 
-        StringCredentials credentials = CredentialsMatchers.firstOrNull(
+        ProxmoxApiTokenCredentials proxmoxCredentials = CredentialsMatchers.firstOrNull(
                 CredentialsProvider.lookupCredentialsInItemGroup(
-                        StringCredentials.class, jenkins, ACL.SYSTEM2, Collections.emptyList()),
+                        ProxmoxApiTokenCredentials.class, jenkins, ACL.SYSTEM2, Collections.emptyList()),
                 CredentialsMatchers.withId(credentialId));
 
-        if (credentials == null) {
-            throw new IOException("Unable to find secret text credential with ID: " + credentialId);
+        if (proxmoxCredentials == null) {
+            throw new IOException("Unable to find Proxmox API token credential with ID: " + credentialId);
         }
 
-        return credentials.getSecret().getPlainText();
+        String tokenSecret = proxmoxCredentials.getTokenSecret() == null
+                ? ""
+                : proxmoxCredentials.getTokenSecret().getPlainText().strip();
+        return proxmoxCredentials.getUsername().strip()
+                + "@"
+                + proxmoxCredentials.getRealm().strip()
+                + "!"
+                + proxmoxCredentials.getTokenId().strip()
+                + "="
+                + tokenSecret;
     }
+
 
     /**
      * Get the next available VM ID from Proxmox cluster.
@@ -662,7 +671,7 @@ public class ProxmoxClient {
                 if (response.code() == 401) {
                     LOGGER.log(
                             Level.WARNING,
-                            "Authentication failed (HTTP 401) - Verify API token credential is correct and properly formatted (userid@pam!tokenid=secret)");
+                            "Authentication failed (HTTP 401) - Verify Proxmox API Token credentials are correct (username, realm, token identifier, token secret)");
                 }
                 if (response.code() == 403) {
                     LOGGER.log(

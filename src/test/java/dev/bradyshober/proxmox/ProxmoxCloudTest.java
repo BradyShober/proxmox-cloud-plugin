@@ -309,10 +309,22 @@ public class ProxmoxCloudTest {
 
     @Test
     @WithJenkins
-    public void testResolveApiTokenFromSecretTextCredential(JenkinsRule jenkinsRule) throws Exception {
-        addSecretTextCredential(jenkinsRule, "proxmox-api-token", "user@pam!tokenid=token-secret");
+    public void testResolveApiTokenFromCustomCredential(JenkinsRule jenkinsRule) throws Exception {
+        addProxmoxApiTokenCredential(jenkinsRule, "proxmox-api-token", "user", "pam", "tokenid", "token-secret");
 
         assertEquals("user@pam!tokenid=token-secret", ProxmoxClient.resolveApiToken("proxmox-api-token"));
+    }
+
+    @Test
+    @WithJenkins
+    public void testResolveApiTokenRejectsLegacySecretTextCredential(JenkinsRule jenkinsRule) throws Exception {
+        addSecretTextCredential(jenkinsRule, "legacy-proxmox-api-token", "user@pam!tokenid=token-secret");
+
+        IOException exception = assertThrows(
+                IOException.class,
+                () -> ProxmoxClient.resolveApiToken("legacy-proxmox-api-token"));
+
+        assertTrue(exception.getMessage().contains("Unable to find Proxmox API token credential"));
     }
 
     @Test
@@ -329,25 +341,31 @@ public class ProxmoxCloudTest {
         IOException exception =
                 assertThrows(IOException.class, () -> ProxmoxClient.resolveApiToken("missing-credential"));
 
-        assertTrue(exception.getMessage().contains("Unable to find secret text credential"));
+        assertTrue(exception.getMessage().contains("Unable to find Proxmox API token credential"));
     }
 
     @Test
     @WithJenkins
-    public void testDescriptorListsSecretTextCredential(JenkinsRule jenkinsRule) throws Exception {
-        addSecretTextCredential(jenkinsRule, "proxmox-api-token", "user@pam!tokenid=token-secret");
+    public void testDescriptorListsCustomProxmoxApiTokenCredential(JenkinsRule jenkinsRule) throws Exception {
+        addProxmoxApiTokenCredential(jenkinsRule, "proxmox-api-token", "user", "pam", "tokenid", "token-secret");
+        addSecretTextCredential(jenkinsRule, "legacy-secret-text", "user@pam!legacy=secret");
 
         ProxmoxCloud.DescriptorImpl descriptor =
                 jenkinsRule.jenkins.getDescriptorByType(ProxmoxCloud.DescriptorImpl.class);
         ListBoxModel items = descriptor.doFillApiTokenCredentialIdItems(null);
 
         assertTrue(items.stream().anyMatch(option -> "proxmox-api-token".equals(option.value)));
+        assertTrue(items.stream()
+                .anyMatch(option -> "proxmox-api-token".equals(option.value)
+                        && option.name != null
+                        && option.name.contains("test proxmox token credential")));
+        assertFalse(items.stream().anyMatch(option -> "legacy-secret-text".equals(option.value)));
     }
 
     @Test
     @WithJenkins
-    public void testDescriptorValidatesSecretTextCredentialSelection(JenkinsRule jenkinsRule) throws Exception {
-        addSecretTextCredential(jenkinsRule, "proxmox-api-token", "user@pam!tokenid=token-secret");
+    public void testDescriptorValidatesCustomCredentialSelection(JenkinsRule jenkinsRule) throws Exception {
+        addProxmoxApiTokenCredential(jenkinsRule, "proxmox-api-token", "user", "pam", "tokenid", "token-secret");
 
         ProxmoxCloud.DescriptorImpl descriptor =
                 jenkinsRule.jenkins.getDescriptorByType(ProxmoxCloud.DescriptorImpl.class);
@@ -355,6 +373,43 @@ public class ProxmoxCloudTest {
         assertEquals(FormValidation.Kind.OK, descriptor.doCheckApiTokenCredentialId("proxmox-api-token").kind);
         assertEquals(FormValidation.Kind.ERROR, descriptor.doCheckApiTokenCredentialId("").kind);
         assertEquals(FormValidation.Kind.ERROR, descriptor.doCheckApiTokenCredentialId("missing-credential").kind);
+    }
+
+    @Test
+    @WithJenkins
+    public void testDescriptorRejectsIncompleteCustomCredential(JenkinsRule jenkinsRule) throws Exception {
+        addProxmoxApiTokenCredential(jenkinsRule, "bad-proxmox-api-token", "", "pam", "tokenid", "token-secret");
+
+        ProxmoxCloud.DescriptorImpl descriptor =
+                jenkinsRule.jenkins.getDescriptorByType(ProxmoxCloud.DescriptorImpl.class);
+
+        assertEquals(FormValidation.Kind.ERROR, descriptor.doCheckApiTokenCredentialId("bad-proxmox-api-token").kind);
+    }
+
+    @Test
+    @WithJenkins
+    public void testProxmoxApiTokenCredentialRealmDropdownIncludesSupportedOptions(JenkinsRule jenkinsRule) {
+        ProxmoxApiTokenCredentialsImpl.DescriptorImpl descriptor =
+                jenkinsRule.jenkins.getDescriptorByType(ProxmoxApiTokenCredentialsImpl.DescriptorImpl.class);
+
+        ListBoxModel realms = descriptor.doFillRealmItems(null);
+
+        assertTrue(realms.stream().anyMatch(option -> "pam".equals(option.value)));
+        assertTrue(realms.stream().anyMatch(option -> "pve".equals(option.value)));
+        assertTrue(realms.stream().anyMatch(option -> "ldap".equals(option.value)));
+        assertTrue(realms.stream().anyMatch(option -> "ad".equals(option.value)));
+        assertTrue(realms.stream().anyMatch(option -> "openid".equals(option.value)));
+    }
+
+    @Test
+    @WithJenkins
+    public void testProxmoxApiTokenCredentialRealmDropdownIncludesCurrentValue(JenkinsRule jenkinsRule) {
+        ProxmoxApiTokenCredentialsImpl.DescriptorImpl descriptor =
+                jenkinsRule.jenkins.getDescriptorByType(ProxmoxApiTokenCredentialsImpl.DescriptorImpl.class);
+
+        ListBoxModel realms = descriptor.doFillRealmItems("customrealm");
+
+        assertTrue(realms.stream().anyMatch(option -> "customrealm".equals(option.value)));
     }
 
     @Test
@@ -573,6 +628,28 @@ public class ProxmoxCloudTest {
     private void addSecretTextCredential(JenkinsRule jenkinsRule, String id, String secret) throws Exception {
         StringCredentialsImpl credentials =
                 new StringCredentialsImpl(CredentialsScope.GLOBAL, id, "test credential", Secret.fromString(secret));
+        Objects.requireNonNull(CredentialsProvider.lookupStores(jenkinsRule.jenkins)
+                        .iterator()
+                        .next())
+                .addCredentials(Domain.global(), credentials);
+    }
+
+    private void addProxmoxApiTokenCredential(
+            JenkinsRule jenkinsRule,
+            String id,
+            String username,
+            String realm,
+            String tokenId,
+            String tokenSecret)
+            throws Exception {
+        ProxmoxApiTokenCredentialsImpl credentials = new ProxmoxApiTokenCredentialsImpl(
+                CredentialsScope.GLOBAL,
+                id,
+                "test proxmox token credential",
+                username,
+                realm,
+                tokenId,
+                Secret.fromString(tokenSecret));
         Objects.requireNonNull(CredentialsProvider.lookupStores(jenkinsRule.jenkins)
                         .iterator()
                         .next())
