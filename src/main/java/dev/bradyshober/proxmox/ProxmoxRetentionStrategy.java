@@ -66,6 +66,31 @@ public class ProxmoxRetentionStrategy extends RetentionStrategy<SlaveComputer> {
             return 1; // Busy - check again in 1 minute
         }
 
+        Jenkins jenkinsInstance = Jenkins.getInstanceOrNull();
+        ProxmoxCloud proxmoxCloud = null;
+        if (jenkinsInstance != null) {
+            if (cloudName == null || cloudName.isBlank() || vmId == null || vmId.isBlank()) {
+                LOGGER.log(Level.WARNING, "Skipping VM termination because cloudName/vmId are not set on retention strategy");
+                return 1;
+            }
+
+            hudson.slaves.Cloud cloud = jenkinsInstance.clouds.getByName(cloudName);
+            if (!(cloud instanceof ProxmoxCloud resolvedCloud)) {
+                LOGGER.log(Level.WARNING, "Could not find ProxmoxCloud '" + cloudName + "' for VM cleanup");
+                return 1;
+            }
+            proxmoxCloud = resolvedCloud;
+
+            // Minimum floor takes precedence: keep idle agents alive until replacement capacity exists.
+            if (!proxmoxCloud.canTerminateVmForScaleDown(vmId)) {
+                LOGGER.log(
+                        Level.FINE,
+                        "Skipping idle termination for " + computer.getName()
+                                + " because cloud minimum instance floor is reached");
+                return 1;
+            }
+        }
+
         long idleMillis = System.currentTimeMillis() - computer.getIdleStartMilliseconds();
         long idleMinutesElapsed = idleMillis / (60_000L);
 
@@ -85,27 +110,7 @@ public class ProxmoxRetentionStrategy extends RetentionStrategy<SlaveComputer> {
         }
 
         // Locate the cloud and trigger VM termination when provenance is known.
-        Jenkins jenkinsInstance = Jenkins.getInstanceOrNull();
-        if (jenkinsInstance != null) {
-            if (cloudName == null || cloudName.isBlank() || vmId == null || vmId.isBlank()) {
-                LOGGER.log(Level.WARNING, "Skipping VM termination because cloudName/vmId are not set on retention strategy");
-                return 1;
-            }
-
-            hudson.slaves.Cloud cloud = jenkinsInstance.clouds.getByName(cloudName);
-            if (!(cloud instanceof ProxmoxCloud proxmoxCloud)) {
-                LOGGER.log(Level.WARNING, "Could not find ProxmoxCloud '" + cloudName + "' for VM cleanup");
-                return 1;
-            }
-
-            if (!proxmoxCloud.canTerminateVmForScaleDown(vmId)) {
-                LOGGER.log(
-                        Level.FINE,
-                        "Skipping idle termination for " + computer.getName()
-                                + " because cloud minimum instance floor is reached");
-                return 1;
-            }
-
+        if (proxmoxCloud != null) {
             proxmoxCloud.terminateInstance(vmId);
 
             // Remove the orphaned node from Jenkins
