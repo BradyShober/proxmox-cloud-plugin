@@ -12,6 +12,7 @@ import hudson.plugins.sshslaves.SSHLauncher;
 import hudson.slaves.ComputerLauncher;
 import hudson.slaves.DumbSlave;
 import hudson.slaves.JNLPLauncher;
+import hudson.slaves.OfflineCause;
 import hudson.util.FormValidation;
 import hudson.util.ListBoxModel;
 import hudson.util.Secret;
@@ -109,8 +110,18 @@ public class ProxmoxCloudTest {
         assertEquals("/home/jenkins", proxmoxCloud.getRemoteFsRoot());
         assertEquals(1, proxmoxCloud.getMinInstances());
         assertEquals(7, proxmoxCloud.getIdleMinutesBeforeTermination());
+        assertEquals(0, proxmoxCloud.getMaxLifetimeMinutes());
         assertFalse(proxmoxCloud.isSkipTlsVerification());
         assertTrue(proxmoxCloud.getInstances().isEmpty());
+    }
+
+    @Test
+    public void testMaxLifetimeMinutesSetterNormalizesValue() {
+        proxmoxCloud.setMaxLifetimeMinutes(120);
+        assertEquals(120, proxmoxCloud.getMaxLifetimeMinutes());
+
+        proxmoxCloud.setMaxLifetimeMinutes(-5);
+        assertEquals(0, proxmoxCloud.getMaxLifetimeMinutes());
     }
 
     @Test
@@ -320,6 +331,7 @@ public class ProxmoxCloudTest {
     @Test
     @WithJenkins
     public void testNodeConfigRoundTripBindsProxmoxRetentionStrategy(JenkinsRule jenkinsRule) throws Exception {
+        proxmoxCloud.setMaxLifetimeMinutes(45);
         DumbSlave slave = buildDumbSlave(proxmoxCloud, "proxmox-agent-1", "101", null);
         jenkinsRule.jenkins.addNode(slave);
 
@@ -329,7 +341,6 @@ public class ProxmoxCloudTest {
         ProxmoxRetentionStrategy retention = (ProxmoxRetentionStrategy) reconfigured.getRetentionStrategy();
         assertEquals("Proxmox", retention.getCloudName());
         assertEquals("101", retention.getVmId());
-        assertEquals(7, retention.getIdleMinutes());
     }
 
     @Test
@@ -396,6 +407,51 @@ public class ProxmoxCloudTest {
 
         // minInstances=0 → always allow termination even with only 1 node.
         assertTrue(noFloorCloud.canTerminateVmForScaleDown("301"));
+    }
+
+    @Test
+    @WithJenkins
+    public void testDrainingMaxLifetimeNodeExcludedFromFloorAndTerminableAfterReplacement(JenkinsRule jenkinsRule)
+            throws Exception {
+        JNLPLauncher launcher = new JNLPLauncher();
+        launcher.setWebSocket(true);
+
+        ProxmoxCloud minCloud = new ProxmoxCloud(
+                "DrainFloorCloud",
+                "https://proxmox.example.com:8006",
+                "proxmox-api-token",
+                false,
+                "pve",
+                "100",
+                "proxmox-agent",
+                1,
+                5,
+                5,
+                launcher,
+                "jenkins",
+                null,
+                "proxmox",
+                "/home/jenkins");
+
+        DumbSlave drainingNode = buildDumbSlave(minCloud, "draining-agent", "701", null);
+        jenkinsRule.jenkins.addNode(drainingNode);
+        assertNotNull(drainingNode.toComputer());
+        Objects.requireNonNull(drainingNode.toComputer())
+                .setTemporarilyOffline(
+                        true,
+                        new OfflineCause.ByCLI(
+                                ProxmoxRetentionStrategy.MAX_LIFETIME_DRAIN_REASON_PREFIX
+                                        + "5 minutes; draining running jobs before termination"));
+
+        // Draining node should not count toward minimum-floor healthy capacity.
+        assertEquals(0, minCloud.countLiveCloudNodes());
+
+        DumbSlave replacementNode = buildDumbSlave(minCloud, "replacement-agent", "702", null);
+        jenkinsRule.jenkins.addNode(replacementNode);
+
+        // With one healthy replacement at min=1, draining VM should be eligible for termination.
+        assertEquals(1, minCloud.countLiveCloudNodes());
+        assertTrue(minCloud.canTerminateVmForScaleDown("701"));
     }
 
     @Test

@@ -32,6 +32,7 @@ import jenkins.model.Jenkins;
 import jenkins.slaves.JnlpSlaveAgentProtocol;
 import org.jenkinsci.plugins.plaincredentials.StringCredentials;
 import org.kohsuke.stapler.DataBoundConstructor;
+import org.kohsuke.stapler.DataBoundSetter;
 import org.kohsuke.stapler.QueryParameter;
 
 /**
@@ -136,9 +137,20 @@ public class ProxmoxCloud extends Cloud {
                 .filter(node -> node instanceof hudson.model.Slave)
                 .map(node -> (hudson.model.Slave) node)
                 .filter(node -> node.getRetentionStrategy() instanceof ProxmoxRetentionStrategy)
-                .map(node -> (ProxmoxRetentionStrategy) node.getRetentionStrategy())
-                .filter(strategy -> name.equals(strategy.getCloudName()))
+                .filter(node -> {
+                    ProxmoxRetentionStrategy strategy = (ProxmoxRetentionStrategy) node.getRetentionStrategy();
+                    return name.equals(strategy.getCloudName()) && !isDrainingForMaxLifetime(node);
+                })
                 .count();
+    }
+
+    private boolean isDrainingForMaxLifetime(hudson.model.Slave node) {
+        hudson.model.Computer computer = node.toComputer();
+        if (!(computer instanceof hudson.slaves.SlaveComputer slaveComputer) || !slaveComputer.isTemporarilyOffline()) {
+            return false;
+        }
+        String reason = slaveComputer.getOfflineCauseReason();
+        return reason != null && reason.startsWith(ProxmoxRetentionStrategy.MAX_LIFETIME_DRAIN_REASON_PREFIX);
     }
 
     /**
@@ -414,7 +426,11 @@ public class ProxmoxCloud extends Cloud {
                 Node.Mode.NORMAL,
                 agentTemplate.getLabels(),
                 launcher,
-                new ProxmoxRetentionStrategy(name, vmId, agentTemplate.getIdleMinutesBeforeTermination()));
+                new ProxmoxRetentionStrategy(
+                        name,
+                        vmId,
+                        agentTemplate.getIdleMinutesBeforeTermination(),
+                        agentTemplate.getMaxLifetimeMinutes()));
     }
 
     private ComputerLauncher buildNodeLauncher(String ipAddress) throws IOException {
@@ -844,6 +860,15 @@ public class ProxmoxCloud extends Cloud {
         return agentTemplate.getIdleMinutesBeforeTermination();
     }
 
+    public int getMaxLifetimeMinutes() {
+        return agentTemplate.getMaxLifetimeMinutes();
+    }
+
+    @DataBoundSetter
+    public void setMaxLifetimeMinutes(int maxLifetimeMinutes) {
+        agentTemplate.setMaxLifetimeMinutes(maxLifetimeMinutes);
+    }
+
     public List<ProxmoxInstance> getInstances() {
         return new ArrayList<>(instances);
     }
@@ -859,15 +884,34 @@ public class ProxmoxCloud extends Cloud {
             return false;
         }
 
-        long activeCount = jenkins.getNodes().stream()
+        long healthyCount = jenkins.getNodes().stream()
                 .filter(node -> node instanceof hudson.model.Slave)
                 .map(node -> (hudson.model.Slave) node)
                 .filter(node -> node.getRetentionStrategy() instanceof ProxmoxRetentionStrategy)
-                .map(node -> (ProxmoxRetentionStrategy) node.getRetentionStrategy())
-                .filter(strategy -> name.equals(strategy.getCloudName()))
+                .filter(node -> {
+                    ProxmoxRetentionStrategy strategy = (ProxmoxRetentionStrategy) node.getRetentionStrategy();
+                    return name.equals(strategy.getCloudName()) && !isDrainingForMaxLifetime(node);
+                })
                 .count();
 
-        return activeCount > minInstances;
+        boolean targetIsDraining = jenkins.getNodes().stream()
+                .filter(node -> node instanceof hudson.model.Slave)
+                .map(node -> (hudson.model.Slave) node)
+                .filter(node -> node.getRetentionStrategy() instanceof ProxmoxRetentionStrategy)
+                .anyMatch(node -> {
+                    ProxmoxRetentionStrategy strategy = (ProxmoxRetentionStrategy) node.getRetentionStrategy();
+                    return name.equals(strategy.getCloudName())
+                            && vmId != null
+                            && vmId.equals(strategy.getVmId())
+                            && isDrainingForMaxLifetime(node);
+                });
+
+        if (targetIsDraining) {
+            // Draining agents are not part of usable floor capacity; terminate once healthy floor is satisfied.
+            return healthyCount >= minInstances;
+        }
+
+        return healthyCount > minInstances;
     }
 
     /**
