@@ -770,9 +770,10 @@ public class ProxmoxClient {
      * @param vmId         VM ID to configure
      * @param ciUser       Linux username to create via cloud-init (e.g. {@code jenkins})
      * @param sshPublicKey SSH public key content (e.g. {@code ssh-rsa AAAA... user@host})
+     * @param tags         Proxmox tags (semicolon-delimited), may be blank
      * @throws Exception if the configuration request or task wait fails
      */
-    public void configureVmCloudInit(String vmId, String ciUser, String sshPublicKey) throws Exception {
+    public void configureVmCloudInit(String vmId, String ciUser, String sshPublicKey, String tags) throws Exception {
         String path = String.format("%s/api2/json/nodes/%s/qemu/%s/config", serverConfig.getHost(), nodeForVm, vmId);
 
         FormBody.Builder bodyBuilder = new FormBody.Builder();
@@ -790,6 +791,10 @@ public class ProxmoxClient {
         // Always request DHCP on the primary NIC so the VM gets a routable IP
         bodyBuilder.add("ipconfig0", "ip=dhcp");
 
+        if (tags != null && !tags.isBlank()) {
+            bodyBuilder.add("tags", tags.trim());
+        }
+
         // PUT /config is asynchronous when Proxmox regenerates the cloud-init ISO.
         // It returns a task UPID and locks the VM; we must wait for the task before
         // calling startVm(), otherwise the start will fail with "VM is locked".
@@ -798,7 +803,7 @@ public class ProxmoxClient {
             LOGGER.log(Level.FINE, "Waiting for cloud-init config task " + taskUpid + " on VM " + vmId);
             waitForTask(taskUpid);
         }
-        LOGGER.log(Level.FINE, "Configured cloud-init params (ciuser, sshkeys, ipconfig0) for VM " + vmId);
+        LOGGER.log(Level.FINE, "Configured VM params (ciuser, sshkeys, ipconfig0, tags) for VM " + vmId);
     }
 
     /**

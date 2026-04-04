@@ -116,6 +116,35 @@ public class ProxmoxCloudTest {
     }
 
     @Test
+    public void testBuildProvisioningTagsIncludesPluginAndCloudTag() {
+        assertEquals("jenkins-proxmox-plugin;jenkins-cloud-proxmox", proxmoxCloud.buildProvisioningTags());
+    }
+
+    @Test
+    public void testBuildProvisioningTagsSanitizesCloudName() {
+        ProxmoxCloud namedCloud = new ProxmoxCloud(
+                "Cloud Name @ Prod",
+                "https://proxmox.example.com:8006",
+                "proxmox-api-token",
+                false,
+                "pve",
+                "100",
+                "proxmox-agent",
+                0,
+                5,
+                5,
+                new JNLPLauncher(),
+                "jenkins",
+                null,
+                "proxmox",
+                "/home/jenkins");
+
+        assertEquals(
+                "jenkins-proxmox-plugin;jenkins-cloud-cloud-name-prod",
+                namedCloud.buildProvisioningTags());
+    }
+
+    @Test
     public void testMaxLifetimeMinutesSetterNormalizesValue() {
         proxmoxCloud.setMaxLifetimeMinutes(120);
         assertEquals(120, proxmoxCloud.getMaxLifetimeMinutes());

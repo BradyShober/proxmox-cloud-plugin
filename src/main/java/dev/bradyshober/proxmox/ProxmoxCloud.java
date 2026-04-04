@@ -41,6 +41,8 @@ import org.kohsuke.stapler.QueryParameter;
  */
 public class ProxmoxCloud extends Cloud {
     private static final Logger LOGGER = Logger.getLogger(ProxmoxCloud.class.getName());
+    private static final String PROVISIONED_BY_PLUGIN_TAG = "jenkins-proxmox-plugin";
+    private static final String CLOUD_TAG_PREFIX = "jenkins-cloud-";
 
     @Serial
     private static final long serialVersionUID = 1L;
@@ -311,7 +313,11 @@ public class ProxmoxCloud extends Cloud {
         // public key into authorized_keys, and request DHCP on the primary NIC.
         // Requires the template to have a cloud-init drive attached.
         try {
-            proxmoxClient.configureVmCloudInit(vmId, agentTemplate.getSshUsername(), agentTemplate.getSshPublicKey());
+            proxmoxClient.configureVmCloudInit(
+                    vmId,
+                    agentTemplate.getSshUsername(),
+                    agentTemplate.getSshPublicKey(),
+                    buildProvisioningTags());
         } catch (Exception e) {
             LOGGER.log(
                     Level.WARNING,
@@ -470,6 +476,15 @@ public class ProxmoxCloud extends Cloud {
 
     private boolean isInboundLauncher(ComputerLauncher launcher) {
         return launcher instanceof JNLPLauncher;
+    }
+
+    String buildProvisioningTags() {
+        String sanitizedCloudName = name == null ? "" : name.trim().toLowerCase().replaceAll("[^a-z0-9_.-]", "-");
+        sanitizedCloudName = sanitizedCloudName.replaceAll("-+", "-").replaceAll("^-|-$", "");
+        if (sanitizedCloudName.isBlank()) {
+            sanitizedCloudName = "default";
+        }
+        return PROVISIONED_BY_PLUGIN_TAG + ";" + CLOUD_TAG_PREFIX + sanitizedCloudName;
     }
 
     /**
