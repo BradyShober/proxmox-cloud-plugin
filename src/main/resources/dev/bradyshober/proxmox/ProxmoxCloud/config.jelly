@@ -50,11 +50,11 @@
     <!-- SSH fields - visibility controlled by JavaScript -->
     <div data-ssh-fields="true">
         <f:entry title="${%Agent SSH Username for cloud-init}" field="sshUsername">
-            <f:textbox default="jenkins" placeholder="jenkins" id="ssh-username-input"/>
+            <f:textbox default="jenkins" placeholder="jenkins"/>
         </f:entry>
 
         <f:entry title="${%Agent SSH Public Key for cloud-init}" field="sshPublicKey">
-            <f:textarea id="ssh-publickey-input"/>
+            <f:textarea/>
         </f:entry>
     </div>
 
