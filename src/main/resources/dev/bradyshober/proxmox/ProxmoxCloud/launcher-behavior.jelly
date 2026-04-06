@@ -1,0 +1,94 @@
+<?jelly escape-by-default='true'?>
+<j:jelly xmlns:j="jelly:core" xmlns:st="jelly:stapler" xmlns:f="/lib/form">
+    <script type="text/javascript"><![CDATA[
+    // Control SSH field visibility based on launcher selection
+    function updateSSHVisibility() {
+        // Find the SSH fields wrapper
+        var sshFieldsWrapper = document.querySelector('[data-ssh-fields="true"]');
+        if (!sshFieldsWrapper) {
+            return;
+        }
+
+        // Find the launcher SELECT by checking all SELECTs on the page
+        var launcherSelect = null;
+        var allSelects = document.querySelectorAll('select');
+
+        // Look for a SELECT that has options containing "Launch"
+        for (var i = 0; i < allSelects.length; i++) {
+            var select = allSelects[i];
+            var hasLauncherOptions = false;
+
+            for (var j = 0; j < select.options.length; j++) {
+                var optionText = select.options[j].text;
+                // Look for options containing "Launch" (covers "Launch agent", "Launch agents", etc.)
+                if (optionText.indexOf('Launch') > -1) {
+                    hasLauncherOptions = true;
+                    break;
+                }
+            }
+
+            if (hasLauncherOptions) {
+                launcherSelect = select;
+                break;
+            }
+        }
+
+        if (!launcherSelect) {
+            return;
+        }
+
+        // Get the selected option text
+        var selectedIndex = launcherSelect.selectedIndex;
+        var selectedText = '';
+        if (selectedIndex >= 0 && selectedIndex < launcherSelect.options.length) {
+            selectedText = launcherSelect.options[selectedIndex].text;
+        }
+
+        // Check if SSH is selected (look for "SSH" in the selected option text)
+        var isSsh = selectedText.indexOf('SSH') > -1;
+
+        // Show/hide the SSH fields wrapper
+        var displayValue = isSsh ? '' : 'none';
+        sshFieldsWrapper.style.display = displayValue;
+    }
+
+    // Call on DOMContentLoaded
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', function() {
+            setTimeout(updateSSHVisibility, 200);
+        });
+    } else {
+        setTimeout(updateSSHVisibility, 200);
+    }
+
+    // Set up change listeners
+    setTimeout(function() {
+        var allSelects = document.querySelectorAll('select');
+
+        // Find the launcher SELECT
+        for (var i = 0; i < allSelects.length; i++) {
+            var select = allSelects[i];
+            var hasLauncherOptions = false;
+
+            for (var j = 0; j < select.options.length; j++) {
+                // Look for options containing "Launch"
+                if (select.options[j].text.indexOf('Launch') > -1) {
+                    hasLauncherOptions = true;
+                    break;
+                }
+            }
+
+            if (hasLauncherOptions) {
+                select.addEventListener('change', function() {
+                    updateSSHVisibility();
+                });
+                break;
+            }
+        }
+
+        // Force initial update
+        updateSSHVisibility();
+    }, 300);
+    ]]></script>
+</j:jelly>
+

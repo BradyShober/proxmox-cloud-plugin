@@ -1012,6 +1012,9 @@ public class ProxmoxCloud extends Cloud {
             return FormValidation.ok();
         }
 
+        public boolean isSSHLauncher(ComputerLauncher launcher) {
+            return launcher instanceof SSHLauncher;
+        }
 
         @Override
         public String getDisplayName() {

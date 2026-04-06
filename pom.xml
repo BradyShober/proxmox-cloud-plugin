@@ -43,7 +43,7 @@
     <hpi.strictBundledArtifacts>true</hpi.strictBundledArtifacts>
 
     <!-- Bundled artifacts for HTTP client and JSON -->
-    <hpi.bundledArtifacts>annotations,gson,kotlin-stdlib,kotlin-stdlib-common,kotlin-stdlib-jdk7,kotlin-stdlib-jdk8,okhttp,okio,okio-jvm</hpi.bundledArtifacts>
+    <hpi.bundledArtifacts>annotations,error_prone_annotations,gson,kotlin-stdlib,kotlin-stdlib-common,kotlin-stdlib-jdk7,kotlin-stdlib-jdk8,okhttp,okio,okio-jvm</hpi.bundledArtifacts>
   </properties>
 
   <dependencyManagement>
