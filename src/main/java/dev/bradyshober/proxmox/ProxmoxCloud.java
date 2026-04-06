@@ -74,7 +74,8 @@ public class ProxmoxCloud extends Cloud {
             String sshUsername,
             String sshPublicKey,
             String labels,
-            String remoteFsRoot) {
+            String remoteFsRoot,
+            int numExecutors) {
         super(name);
         this.serverConfig = new ProxmoxServerConfig(
                 host, apiTokenCredentialId, !skipTlsVerification, node == null || node.isBlank() ? "pve" : node);
@@ -94,6 +95,7 @@ public class ProxmoxCloud extends Cloud {
                 idleMinutesBeforeTermination > 0
                         ? idleMinutesBeforeTermination
                         : ProxmoxRetentionStrategy.DEFAULT_IDLE_MINUTES);
+        agentTemplate.setNumExecutors(Math.max(1, numExecutors));
         this.instances = Collections.synchronizedList(new ArrayList<>());
     }
 
@@ -236,7 +238,7 @@ public class ProxmoxCloud extends Cloud {
                                 return null;
                             }
                         }),
-                        1 // Number of executors per node
+                        agentTemplate.getNumExecutors()
                         );
 
                 plannedNodes.add(plannedNode);
@@ -427,7 +429,7 @@ public class ProxmoxCloud extends Cloud {
                 agentName,
                 "Proxmox provisioned agent (VM " + vmId + ")",
                 agentTemplate.getRemoteFsRoot(),
-                "1",
+                String.valueOf(agentTemplate.getNumExecutors()),
                 Node.Mode.NORMAL,
                 agentTemplate.getLabels(),
                 launcher,
@@ -881,6 +883,15 @@ public class ProxmoxCloud extends Cloud {
     @DataBoundSetter
     public void setMaxLifetimeMinutes(int maxLifetimeMinutes) {
         agentTemplate.setMaxLifetimeMinutes(maxLifetimeMinutes);
+    }
+
+    public int getNumExecutors() {
+        return agentTemplate.getNumExecutors();
+    }
+
+    @DataBoundSetter
+    public void setNumExecutors(int numExecutors) {
+        agentTemplate.setNumExecutors(numExecutors);
     }
 
     public List<ProxmoxInstance> getInstances() {

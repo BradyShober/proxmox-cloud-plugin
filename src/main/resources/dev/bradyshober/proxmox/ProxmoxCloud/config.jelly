@@ -45,6 +45,10 @@
         <f:number default="0" min="0"/>
     </f:entry>
 
+    <f:entry title="${%Number of Executors}" field="numExecutors">
+        <f:number default="1" min="1"/>
+    </f:entry>
+
     <f:dropdownDescriptorSelector title="${%Agent Launcher}" field="launcher"/>
 
     <!-- SSH fields - visibility controlled by JavaScript -->
