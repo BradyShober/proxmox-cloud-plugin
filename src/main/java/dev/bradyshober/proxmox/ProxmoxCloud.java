@@ -4,6 +4,8 @@ import com.cloudbees.plugins.credentials.CredentialsMatchers;
 import com.cloudbees.plugins.credentials.CredentialsProvider;
 import com.cloudbees.plugins.credentials.common.StandardListBoxModel;
 import hudson.Extension;
+import hudson.init.InitMilestone;
+import hudson.init.Initializer;
 import hudson.model.AsyncPeriodicWork;
 import hudson.model.Descriptor;
 import hudson.model.Label;
@@ -23,6 +25,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.Level;
@@ -56,6 +59,8 @@ public class ProxmoxCloud extends Cloud {
      * threads cannot obtain the same VM ID from Proxmox before any clone has been submitted.
      */
     private transient volatile Object vmAllocationLock;
+    /** Ensures we reconcile tagged VMs from Proxmox before new provisioning proceeds. */
+    private transient volatile boolean startupReconciled;
 
     @DataBoundConstructor
     public ProxmoxCloud(
@@ -205,6 +210,7 @@ public class ProxmoxCloud extends Cloud {
         List<NodeProvisioner.PlannedNode> plannedNodes = new ArrayList<>();
 
         try {
+            ensureStartupReconciled();
             if (proxmoxClient == null) {
                 initializeClient();
             }
@@ -495,12 +501,124 @@ public class ProxmoxCloud extends Cloud {
     }
 
     String buildProvisioningTags() {
-        String sanitizedCloudName = name == null ? "" : name.trim().toLowerCase().replaceAll("[^a-z0-9_.-]", "-");
+        return PROVISIONED_BY_PLUGIN_TAG + ";" + buildCloudOwnershipTag();
+    }
+
+    String buildCloudOwnershipTag() {
+        String sanitizedCloudName = name == null
+                ? ""
+                : name.trim().toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9_.-]", "-");
         sanitizedCloudName = sanitizedCloudName.replaceAll("-+", "-").replaceAll("^-|-$", "");
         if (sanitizedCloudName.isBlank()) {
             sanitizedCloudName = "default";
         }
-        return PROVISIONED_BY_PLUGIN_TAG + ";" + CLOUD_TAG_PREFIX + sanitizedCloudName;
+        return CLOUD_TAG_PREFIX + sanitizedCloudName;
+    }
+
+    static boolean hasTag(String tags, String expectedTag) {
+        if (expectedTag == null || expectedTag.isBlank() || tags == null || tags.isBlank()) {
+            return false;
+        }
+        String[] parts = tags.split("[;,\\s]+");
+        for (String part : parts) {
+            if (expectedTag.equals(part.trim())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    boolean isManagedVmTags(String tags) {
+        return hasTag(tags, PROVISIONED_BY_PLUGIN_TAG) && hasTag(tags, buildCloudOwnershipTag());
+    }
+
+    private void ensureStartupReconciled() {
+        if (startupReconciled) {
+            return;
+        }
+        synchronized (this) {
+            if (startupReconciled) {
+                return;
+            }
+            try {
+                reconcileExistingTaggedVms();
+                startupReconciled = true;
+            } catch (Exception e) {
+                LOGGER.log(Level.WARNING, "Failed startup VM reconciliation for cloud '" + name + "'", e);
+            }
+        }
+    }
+
+    public synchronized void reconcileExistingTaggedVms() throws Exception {
+        if (proxmoxClient == null) {
+            initializeClient();
+        }
+
+        Jenkins jenkins = Jenkins.getInstanceOrNull();
+        if (jenkins == null) {
+            return;
+        }
+
+        int discovered = 0;
+        int restored = 0;
+        for (ProxmoxClient.ProxmoxVmSummary vm : proxmoxClient.listNodeVms()) {
+            if (vm == null || !isManagedVmTags(vm.getTags())) {
+                continue;
+            }
+
+            discovered++;
+            String vmId = vm.getVmId();
+            if (vmId == null || vmId.isBlank()) {
+                continue;
+            }
+
+            if (findNodeByVmId(jenkins, vmId) != null) {
+                continue;
+            }
+
+            String status = vm.getStatus() == null ? "" : vm.getStatus().toLowerCase(Locale.ROOT);
+            if (!("running".equals(status) || "starting".equals(status))) {
+                LOGGER.log(Level.FINE, "Skipping VM " + vmId + " during reconciliation because status is '" + status + "'");
+                continue;
+            }
+
+            String agentName = (vm.getName() == null || vm.getName().isBlank())
+                    ? (agentTemplate.getAgentNameTemplate() + "-" + vmId)
+                    : vm.getName();
+
+            if (jenkins.getNode(agentName) != null) {
+                LOGGER.log(
+                        Level.WARNING,
+                        "Skipping VM " + vmId + " reconciliation because node name already exists: " + agentName);
+                continue;
+            }
+
+            String ipAddress = null;
+            if (agentTemplate.getLauncher() instanceof SSHLauncher) {
+                try {
+                    ipAddress = proxmoxClient.getVmIpAddress(vmId);
+                } catch (Exception e) {
+                    LOGGER.log(
+                            Level.WARNING,
+                            "Skipping SSH node re-attachment for VM " + vmId
+                                    + " because IP could not be resolved via guest agent",
+                            e);
+                    continue;
+                }
+            }
+
+            ProxmoxNode recoveredNode = buildDumbSlave(agentName, vmId, ipAddress);
+            jenkins.addNode(recoveredNode);
+            instances.add(new ProxmoxInstance(vmId, agentName));
+            restored++;
+        }
+
+        if (discovered > 0) {
+            LOGGER.log(
+                    Level.INFO,
+                    "Cloud ''{0}'': reconciled {1}/{2} tagged VM(s) back into Jenkins after startup",
+                    new Object[] {name, restored, discovered});
+        }
     }
 
     /**
@@ -721,6 +839,8 @@ public class ProxmoxCloud extends Cloud {
      * Called by the periodic {@link MinInstancesReconciler} every minute, independent of queue demand.
      */
     public void reconcileMinInstances() {
+        ensureStartupReconciled();
+
         int minInstances = agentTemplate.getMinInstances();
         if (minInstances <= 0) {
             return; // No minimum configured – nothing to do.
@@ -998,6 +1118,34 @@ public class ProxmoxCloud extends Cloud {
                 }
             }
         }
+    }
+
+    @Initializer(after = InitMilestone.JOB_LOADED)
+    public static void reconcileCloudNodesOnStartup() {
+        Jenkins jenkins = Jenkins.getInstanceOrNull();
+        if (jenkins == null) {
+            return;
+        }
+        for (Cloud cloud : jenkins.clouds) {
+            if (cloud instanceof ProxmoxCloud proxmoxCloud) {
+                proxmoxCloud.ensureStartupReconciled();
+            }
+        }
+    }
+
+    private Node findNodeByVmId(Jenkins jenkins, String vmId) {
+        for (Node node : jenkins.getNodes()) {
+            if (!(node instanceof hudson.model.Slave slave)) {
+                continue;
+            }
+            if (!(slave.getRetentionStrategy() instanceof ProxmoxRetentionStrategy retention)) {
+                continue;
+            }
+            if (name.equals(retention.getCloudName()) && vmId.equals(retention.getVmId())) {
+                return node;
+            }
+        }
+        return null;
     }
 
     @Extension

@@ -9,8 +9,10 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.security.cert.X509Certificate;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collections;
+import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -37,6 +39,36 @@ public class ProxmoxClient {
     private final OkHttpClient httpClient;
     private final String nodeForVm; // MVP: single node assumption
     private String authToken; // Session token from login
+
+    public static final class ProxmoxVmSummary {
+        private final String vmId;
+        private final String name;
+        private final String status;
+        private final String tags;
+
+        ProxmoxVmSummary(String vmId, String name, String status, String tags) {
+            this.vmId = vmId;
+            this.name = name;
+            this.status = status;
+            this.tags = tags;
+        }
+
+        public String getVmId() {
+            return vmId;
+        }
+
+        public String getName() {
+            return name;
+        }
+
+        public String getStatus() {
+            return status;
+        }
+
+        public String getTags() {
+            return tags;
+        }
+    }
 
     public ProxmoxClient(ProxmoxServerConfig serverConfig) throws IOException {
         this.serverConfig = serverConfig;
@@ -561,6 +593,59 @@ public class ProxmoxClient {
                 return jsonResponse.get("data").getAsString();
             }
             throw new Exception("No UPID returned from delete operation");
+        }
+    }
+
+    /**
+     * List QEMU VMs on the configured Proxmox node.
+     */
+    public List<ProxmoxVmSummary> listNodeVms() throws IOException {
+        String path = String.format("%s/api2/json/nodes/%s/qemu", serverConfig.getHost(), nodeForVm);
+        Request request = new Request.Builder()
+                .url(path)
+                .get()
+                .addHeader("Authorization", authToken)
+                .build();
+
+        try (Response response = httpClient.newCall(request).execute()) {
+            if (!response.isSuccessful()) {
+                okhttp3.ResponseBody body = response.body();
+                String responseBody = body != null ? body.string() : "";
+                throw new IOException("Failed to list VMs: HTTP " + response.code() + " " + responseBody);
+            }
+
+            okhttp3.ResponseBody body = response.body();
+            String responseBody = body != null ? body.string() : "{}";
+            JsonObject json = gson.fromJson(responseBody, JsonObject.class);
+
+            List<ProxmoxVmSummary> vms = new ArrayList<>();
+            if (json == null || !json.has("data") || !json.get("data").isJsonArray()) {
+                return vms;
+            }
+
+            for (com.google.gson.JsonElement elem : json.getAsJsonArray("data")) {
+                if (!elem.isJsonObject()) {
+                    continue;
+                }
+                JsonObject vm = elem.getAsJsonObject();
+                String vmId = vm.has("vmid") && !vm.get("vmid").isJsonNull()
+                        ? vm.get("vmid").getAsString()
+                        : null;
+                if (vmId == null || vmId.isBlank()) {
+                    continue;
+                }
+                String name = vm.has("name") && !vm.get("name").isJsonNull()
+                        ? vm.get("name").getAsString()
+                        : null;
+                String status = vm.has("status") && !vm.get("status").isJsonNull()
+                        ? vm.get("status").getAsString()
+                        : null;
+                String tags = vm.has("tags") && !vm.get("tags").isJsonNull()
+                        ? vm.get("tags").getAsString()
+                        : "";
+                vms.add(new ProxmoxVmSummary(vmId, name, status, tags));
+            }
+            return vms;
         }
     }
 

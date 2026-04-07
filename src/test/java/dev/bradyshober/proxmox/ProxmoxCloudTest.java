@@ -149,6 +149,19 @@ public class ProxmoxCloudTest {
     }
 
     @Test
+    public void testHasTagMatchesSemicolonDelimitedTags() {
+        assertTrue(ProxmoxCloud.hasTag("a;b;c", "b"));
+        assertFalse(ProxmoxCloud.hasTag("a;b;c", "x"));
+    }
+
+    @Test
+    public void testIsManagedVmTagsRequiresPluginAndCloudOwnershipTags() {
+        assertTrue(proxmoxCloud.isManagedVmTags("jenkins-proxmox-plugin;jenkins-cloud-proxmox;ci"));
+        assertFalse(proxmoxCloud.isManagedVmTags("jenkins-proxmox-plugin;jenkins-cloud-other"));
+        assertFalse(proxmoxCloud.isManagedVmTags("jenkins-cloud-proxmox"));
+    }
+
+    @Test
     public void testMaxLifetimeMinutesSetterNormalizesValue() {
         proxmoxCloud.setMaxLifetimeMinutes(120);
         assertEquals(120, proxmoxCloud.getMaxLifetimeMinutes());
