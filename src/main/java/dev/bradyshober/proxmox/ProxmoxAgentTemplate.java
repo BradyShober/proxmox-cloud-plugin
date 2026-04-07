@@ -22,6 +22,7 @@ public class ProxmoxAgentTemplate implements Serializable {
     private String remoteFsRoot;
     private int idleMinutesBeforeTermination;
     private int maxLifetimeMinutes;
+    private int maxBuildsPerAgent;
     private int numExecutors;
 
     public ProxmoxAgentTemplate(
@@ -46,6 +47,7 @@ public class ProxmoxAgentTemplate implements Serializable {
         this.remoteFsRoot = remoteFsRoot;
         this.idleMinutesBeforeTermination = idleMinutesBeforeTermination;
         this.maxLifetimeMinutes = 0;
+        this.maxBuildsPerAgent = 0;
         this.numExecutors = 1;
     }
 
@@ -135,6 +137,14 @@ public class ProxmoxAgentTemplate implements Serializable {
 
     public void setMaxLifetimeMinutes(int maxLifetimeMinutes) {
         this.maxLifetimeMinutes = Math.max(0, maxLifetimeMinutes);
+    }
+
+    public int getMaxBuildsPerAgent() {
+        return maxBuildsPerAgent;
+    }
+
+    public void setMaxBuildsPerAgent(int maxBuildsPerAgent) {
+        this.maxBuildsPerAgent = Math.max(0, maxBuildsPerAgent);
     }
 
     public int getNumExecutors() {

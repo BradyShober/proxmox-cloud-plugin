@@ -45,6 +45,10 @@
         <f:number default="0" min="0"/>
     </f:entry>
 
+    <f:entry title="${%Max Builds Per Agent (0 = disabled)}" field="maxBuildsPerAgent">
+        <f:number default="0" min="0"/>
+    </f:entry>
+
     <f:entry title="${%Number of Executors}" field="numExecutors">
         <f:number default="1" min="1"/>
     </f:entry>

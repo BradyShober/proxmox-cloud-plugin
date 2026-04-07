@@ -13,7 +13,6 @@ import hudson.plugins.sshslaves.SSHLauncher;
 import hudson.security.ACL;
 import hudson.slaves.Cloud;
 import hudson.slaves.ComputerLauncher;
-import hudson.slaves.DumbSlave;
 import hudson.slaves.JNLPLauncher;
 import hudson.slaves.NodeProvisioner;
 import hudson.util.FormValidation;
@@ -142,7 +141,7 @@ public class ProxmoxCloud extends Cloud {
                 .filter(node -> node.getRetentionStrategy() instanceof ProxmoxRetentionStrategy)
                 .filter(node -> {
                     ProxmoxRetentionStrategy strategy = (ProxmoxRetentionStrategy) node.getRetentionStrategy();
-                    return name.equals(strategy.getCloudName()) && !isDrainingForMaxLifetime(node);
+                    return name.equals(strategy.getCloudName()) && !isDraining(node);
                 })
                 .count();
     }
@@ -154,6 +153,20 @@ public class ProxmoxCloud extends Cloud {
         }
         String reason = slaveComputer.getOfflineCauseReason();
         return reason != null && reason.startsWith(ProxmoxRetentionStrategy.MAX_LIFETIME_DRAIN_REASON_PREFIX);
+    }
+
+    private boolean isDrainingForMaxBuilds(hudson.model.Slave node) {
+        hudson.model.Computer computer = node.toComputer();
+        if (!(computer instanceof hudson.slaves.SlaveComputer slaveComputer) || !slaveComputer.isTemporarilyOffline()) {
+            return false;
+        }
+        String reason = slaveComputer.getOfflineCauseReason();
+        return reason != null && reason.startsWith(ProxmoxRetentionStrategy.MAX_BUILDS_DRAIN_REASON_PREFIX);
+    }
+
+    /** Returns true if the node is being drained for any reason (max lifetime or max builds). */
+    private boolean isDraining(hudson.model.Slave node) {
+        return isDrainingForMaxLifetime(node) || isDrainingForMaxBuilds(node);
     }
 
     /**
@@ -293,7 +306,7 @@ public class ProxmoxCloud extends Cloud {
 
         // Pre-register the Jenkins node now that the real vmId is known.
         // This must happen before the VM boots so Jenkins can accept the inbound connection.
-        DumbSlave preRegisteredNode = null;
+        ProxmoxNode preRegisteredNode = null;
         if (inboundLauncher) {
             preRegisteredNode = buildDumbSlave(agentName, vmId, null);
             Jenkins.get().addNode(preRegisteredNode);
@@ -412,7 +425,7 @@ public class ProxmoxCloud extends Cloud {
     }
 
     /**
-     * Build a Jenkins {@link DumbSlave} node for the provisioned VM, wired with the
+     * Build a Jenkins {@link ProxmoxNode} for the provisioned VM, wired with the
      * appropriate launcher and a {@link ProxmoxRetentionStrategy} that will delete the
      * VM once the agent has been idle for {@link ProxmoxRetentionStrategy#DEFAULT_IDLE_MINUTES}
      * minutes.
@@ -422,14 +435,14 @@ public class ProxmoxCloud extends Cloud {
      * @param ipAddress resolved IP address for SSH connections; may be {@code null} for
      *                  WebSocket/inbound agents
      */
-    private DumbSlave buildDumbSlave(String agentName, String vmId, String ipAddress) throws Exception {
+      private ProxmoxNode buildDumbSlave(String agentName, String vmId, String ipAddress) throws Exception {
         ComputerLauncher launcher = buildNodeLauncher(ipAddress);
 
-        return new DumbSlave(
+        return new ProxmoxNode(
                 agentName,
                 "Proxmox provisioned agent (VM " + vmId + ")",
                 agentTemplate.getRemoteFsRoot(),
-                String.valueOf(agentTemplate.getNumExecutors()),
+                agentTemplate.getNumExecutors(),
                 Node.Mode.NORMAL,
                 agentTemplate.getLabels(),
                 launcher,
@@ -437,7 +450,9 @@ public class ProxmoxCloud extends Cloud {
                         name,
                         vmId,
                         agentTemplate.getIdleMinutesBeforeTermination(),
-                        agentTemplate.getMaxLifetimeMinutes()));
+                        agentTemplate.getMaxLifetimeMinutes(),
+                        agentTemplate.getMaxBuildsPerAgent()),
+                agentTemplate.getMaxBuildsPerAgent());
     }
 
     private ComputerLauncher buildNodeLauncher(String ipAddress) throws IOException {
@@ -885,6 +900,15 @@ public class ProxmoxCloud extends Cloud {
         agentTemplate.setMaxLifetimeMinutes(maxLifetimeMinutes);
     }
 
+    public int getMaxBuildsPerAgent() {
+        return agentTemplate.getMaxBuildsPerAgent();
+    }
+
+    @DataBoundSetter
+    public void setMaxBuildsPerAgent(int maxBuildsPerAgent) {
+        agentTemplate.setMaxBuildsPerAgent(maxBuildsPerAgent);
+    }
+
     public int getNumExecutors() {
         return agentTemplate.getNumExecutors();
     }
@@ -915,7 +939,7 @@ public class ProxmoxCloud extends Cloud {
                 .filter(node -> node.getRetentionStrategy() instanceof ProxmoxRetentionStrategy)
                 .filter(node -> {
                     ProxmoxRetentionStrategy strategy = (ProxmoxRetentionStrategy) node.getRetentionStrategy();
-                    return name.equals(strategy.getCloudName()) && !isDrainingForMaxLifetime(node);
+                    return name.equals(strategy.getCloudName()) && !isDraining(node);
                 })
                 .count();
 
@@ -928,7 +952,7 @@ public class ProxmoxCloud extends Cloud {
                     return name.equals(strategy.getCloudName())
                             && vmId != null
                             && vmId.equals(strategy.getVmId())
-                            && isDrainingForMaxLifetime(node);
+                            && isDraining(node);
                 });
 
         if (targetIsDraining) {

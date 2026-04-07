@@ -2,6 +2,10 @@ package dev.bradyshober.proxmox;
 
 import hudson.Extension;
 import hudson.model.Descriptor;
+import hudson.model.Executor;
+import hudson.model.ExecutorListener;
+import hudson.model.Queue;
+import hudson.model.Slave;
 import hudson.slaves.OfflineCause;
 import hudson.slaves.RetentionStrategy;
 import hudson.slaves.SlaveComputer;
@@ -29,27 +33,36 @@ public class ProxmoxRetentionStrategy extends RetentionStrategy<SlaveComputer> {
     public static final int DEFAULT_MAX_LIFETIME_MINUTES = 0;
     /** Prefix used for temporary-offline reason while draining max-lifetime agents. */
     public static final String MAX_LIFETIME_DRAIN_REASON_PREFIX = "Exceeded max lifetime of ";
+    /** Prefix used for temporary-offline reason while draining max-builds agents. */
+    public static final String MAX_BUILDS_DRAIN_REASON_PREFIX = "Reached max build count of ";
 
     private String cloudName;
     private String vmId;
     private int idleMinutes;
     private int maxLifetimeMinutes;
+    private int maxBuildsPerAgent;
     private long createdAtMillis;
 
     @DataBoundConstructor
     public ProxmoxRetentionStrategy() {
-        this(null, null, DEFAULT_IDLE_MINUTES, DEFAULT_MAX_LIFETIME_MINUTES);
+        this(null, null, DEFAULT_IDLE_MINUTES, DEFAULT_MAX_LIFETIME_MINUTES, 0);
     }
 
     public ProxmoxRetentionStrategy(String cloudName, String vmId, int idleMinutes) {
-        this(cloudName, vmId, idleMinutes, DEFAULT_MAX_LIFETIME_MINUTES);
+        this(cloudName, vmId, idleMinutes, DEFAULT_MAX_LIFETIME_MINUTES, 0);
     }
 
     public ProxmoxRetentionStrategy(String cloudName, String vmId, int idleMinutes, int maxLifetimeMinutes) {
+        this(cloudName, vmId, idleMinutes, maxLifetimeMinutes, 0);
+    }
+
+    public ProxmoxRetentionStrategy(
+            String cloudName, String vmId, int idleMinutes, int maxLifetimeMinutes, int maxBuildsPerAgent) {
         this.cloudName = cloudName;
         this.vmId = vmId;
         this.idleMinutes = idleMinutes > 0 ? idleMinutes : DEFAULT_IDLE_MINUTES;
         this.maxLifetimeMinutes = Math.max(0, maxLifetimeMinutes);
+        this.maxBuildsPerAgent = Math.max(0, maxBuildsPerAgent);
         this.createdAtMillis = System.currentTimeMillis();
     }
 
@@ -73,6 +86,11 @@ public class ProxmoxRetentionStrategy extends RetentionStrategy<SlaveComputer> {
         this.maxLifetimeMinutes = Math.max(0, maxLifetimeMinutes);
     }
 
+    @DataBoundSetter
+    public void setMaxBuildsPerAgent(int maxBuildsPerAgent) {
+        this.maxBuildsPerAgent = Math.max(0, maxBuildsPerAgent);
+    }
+
     /**
      * Called periodically by Jenkins to decide whether to keep or terminate the agent.
      *
@@ -86,6 +104,7 @@ public class ProxmoxRetentionStrategy extends RetentionStrategy<SlaveComputer> {
 
         int effectiveIdleMinutes = idleMinutes;
         int effectiveMaxLifetimeMinutes = maxLifetimeMinutes;
+        int effectiveMaxBuilds = maxBuildsPerAgent;
 
         Jenkins jenkinsInstance = Jenkins.getInstanceOrNull();
         ProxmoxCloud proxmoxCloud = null;
@@ -96,6 +115,7 @@ public class ProxmoxRetentionStrategy extends RetentionStrategy<SlaveComputer> {
                 // Cloud-level policy is authoritative for lifecycle thresholds.
                 effectiveIdleMinutes = proxmoxCloud.getIdleMinutesBeforeTermination();
                 effectiveMaxLifetimeMinutes = proxmoxCloud.getMaxLifetimeMinutes();
+                effectiveMaxBuilds = proxmoxCloud.getMaxBuildsPerAgent();
             }
         }
 
@@ -110,6 +130,32 @@ public class ProxmoxRetentionStrategy extends RetentionStrategy<SlaveComputer> {
                     Level.INFO,
                     "Agent " + computer.getName() + " exceeded max lifetime of " + effectiveMaxLifetimeMinutes
                             + " min; marked temporarily offline for drain");
+        }
+
+        boolean maxBuildsExceeded = false;
+        if (effectiveMaxBuilds > 0) {
+            @SuppressWarnings("deprecation")
+            int completedBuilds = computer.getBuilds().size();
+            int runningBuilds = computer.countBusy();
+            int remaining = Math.max(0, effectiveMaxBuilds - completedBuilds - runningBuilds);
+            maxBuildsExceeded = (completedBuilds + runningBuilds) >= effectiveMaxBuilds;
+
+            hudson.model.Node node = computer.getNode();
+            if (node instanceof ProxmoxNode proxmoxNode) {
+                // Keep UI state in sync with real execution history to avoid stale counters.
+                proxmoxNode.setBuildsRemaining(remaining);
+            }
+        }
+
+        // Mark offline immediately if max builds is exceeded, before checking idle
+        if (maxBuildsExceeded && !computer.isTemporarilyOffline()) {
+            String offlineReason = MAX_BUILDS_DRAIN_REASON_PREFIX + effectiveMaxBuilds
+                    + " builds; draining running jobs before termination";
+            computer.setTemporarilyOffline(true, new OfflineCause.ByCLI(offlineReason));
+            LOGGER.log(
+                    Level.INFO,
+                    "Agent " + computer.getName() + " reached max build count of " + effectiveMaxBuilds
+                            + "; marked temporarily offline for drain");
         }
 
         if (!computer.isIdle()) {
@@ -137,7 +183,7 @@ public class ProxmoxRetentionStrategy extends RetentionStrategy<SlaveComputer> {
             }
         }
 
-        if (!maxLifetimeExceeded) {
+        if (!maxLifetimeExceeded && !maxBuildsExceeded) {
             long idleMillis = System.currentTimeMillis() - computer.getIdleStartMilliseconds();
             long idleMinutesElapsed = idleMillis / (60_000L);
 
@@ -149,6 +195,11 @@ public class ProxmoxRetentionStrategy extends RetentionStrategy<SlaveComputer> {
                     Level.INFO,
                     "Agent " + computer.getName() + " idle for " + idleMinutesElapsed + " min (threshold "
                             + effectiveIdleMinutes + " min); terminating VM " + vmId);
+        } else if (maxBuildsExceeded) {
+            LOGGER.log(
+                    Level.INFO,
+                    "Agent " + computer.getName() + " reached max build count and is now idle; terminating VM "
+                            + vmId);
         } else {
             LOGGER.log(
                     Level.INFO,
@@ -185,6 +236,64 @@ public class ProxmoxRetentionStrategy extends RetentionStrategy<SlaveComputer> {
         computer.connect(false);
     }
 
+    public void taskAccepted(Executor executor, Queue.Task task) {
+        if (!(executor.getOwner() instanceof SlaveComputer computer)) {
+            return;
+        }
+        hudson.model.Node node = computer.getNode();
+        if (!(node instanceof ProxmoxNode proxmoxNode)) {
+            return;
+        }
+        int configuredMaxBuilds = proxmoxNode.getEffectiveMaxBuildsPerAgent();
+        if (configuredMaxBuilds <= 0) {
+            return;
+        }
+
+        @SuppressWarnings("deprecation")
+        int completedBuilds = computer.getBuilds().size();
+        int runningBuilds = computer.countBusy();
+        // taskAccepted can race with executor busy-state updates; assume at least one active assignment.
+        int effectiveRunningBuilds = Math.max(1, runningBuilds);
+        int remainingFromHistory = Math.max(0, configuredMaxBuilds - completedBuilds - effectiveRunningBuilds);
+        int currentRemaining = proxmoxNode.getBuildsRemaining();
+        int remainingAfterAcceptance = currentRemaining > 0 ? currentRemaining - 1 : Integer.MAX_VALUE;
+        int remaining = remainingAfterAcceptance == Integer.MAX_VALUE
+                ? remainingFromHistory
+                : Math.min(Math.max(0, remainingAfterAcceptance), remainingFromHistory);
+        proxmoxNode.setBuildsRemaining(remaining);
+        if (remaining <= 0) {
+            computer.setAcceptingTasks(false);
+            if (!computer.isTemporarilyOffline()) {
+                String offlineReason = MAX_BUILDS_DRAIN_REASON_PREFIX + configuredMaxBuilds
+                        + " builds; draining running jobs before termination";
+                computer.setTemporarilyOffline(true, new OfflineCause.ByCLI(offlineReason));
+            }
+            LOGGER.log(
+                    Level.INFO,
+                    "Agent " + computer.getName() + " accepted its final allowed build (max=" + configuredMaxBuilds
+                            + "); disabled for further scheduling");
+        } else {
+            LOGGER.log(Level.FINE, "Agent " + computer.getName() + " has " + remaining + " builds remaining");
+        }
+    }
+
+    public void taskCompleted(Executor executor, Queue.Task task, long durationMS) {
+        maybeTriggerDrainTermination(executor);
+    }
+
+    public void taskCompletedWithProblems(Executor executor, Queue.Task task, long durationMS, Throwable problems) {
+        maybeTriggerDrainTermination(executor);
+    }
+
+    private void maybeTriggerDrainTermination(Executor executor) {
+        if (!(executor.getOwner() instanceof SlaveComputer computer)) {
+            return;
+        }
+        if (computer.countBusy() == 0 && !computer.isAcceptingTasks()) {
+            check(computer);
+        }
+    }
+
     public String getCloudName() {
         return cloudName;
     }
@@ -200,6 +309,43 @@ public class ProxmoxRetentionStrategy extends RetentionStrategy<SlaveComputer> {
     public int getMaxLifetimeMinutes() {
         return maxLifetimeMinutes;
     }
+
+    public int getMaxBuildsPerAgent() {
+        return maxBuildsPerAgent;
+    }
+
+    @Extension
+    public static class BuildEventBridge implements ExecutorListener {
+        @Override
+        public void taskAccepted(Executor executor, Queue.Task task) {
+            withStrategy(executor, strategy -> strategy.taskAccepted(executor, task));
+        }
+
+        @Override
+        public void taskCompleted(Executor executor, Queue.Task task, long durationMS) {
+            withStrategy(executor, strategy -> strategy.taskCompleted(executor, task, durationMS));
+        }
+
+        @Override
+        public void taskCompletedWithProblems(Executor executor, Queue.Task task, long durationMS, Throwable problems) {
+            withStrategy(executor, strategy -> strategy.taskCompletedWithProblems(executor, task, durationMS, problems));
+        }
+
+        private static void withStrategy(Executor executor, java.util.function.Consumer<ProxmoxRetentionStrategy> callback) {
+            if (!(executor.getOwner() instanceof SlaveComputer computer)) {
+                return;
+            }
+            if (!(computer.getNode() instanceof Slave)) {
+                return;
+            }
+            Slave slave = (Slave) computer.getNode();
+            if (!(slave.getRetentionStrategy() instanceof ProxmoxRetentionStrategy strategy)) {
+                return;
+            }
+            callback.accept(strategy);
+        }
+    }
+
 
     @Extension
     public static class DescriptorImpl extends Descriptor<RetentionStrategy<?>> {

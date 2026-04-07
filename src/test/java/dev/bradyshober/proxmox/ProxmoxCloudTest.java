@@ -6,13 +6,15 @@ import com.cloudbees.plugins.credentials.CredentialsProvider;
 import com.cloudbees.plugins.credentials.CredentialsScope;
 import com.cloudbees.plugins.credentials.domains.Domain;
 import com.google.gson.JsonObject;
+import hudson.model.Executor;
 import hudson.model.Label;
+import hudson.model.Node;
 import hudson.model.labels.LabelAtom;
 import hudson.plugins.sshslaves.SSHLauncher;
 import hudson.slaves.ComputerLauncher;
-import hudson.slaves.DumbSlave;
 import hudson.slaves.JNLPLauncher;
 import hudson.slaves.OfflineCause;
+import hudson.slaves.SlaveComputer;
 import hudson.util.FormValidation;
 import hudson.util.ListBoxModel;
 import hudson.util.Secret;
@@ -72,7 +74,8 @@ public class ProxmoxCloudTest {
                 agentTemplate.getSshUsername(),
                 agentTemplate.getSshPublicKey(),
                 agentTemplate.getLabels(),
-                agentTemplate.getRemoteFsRoot());
+                agentTemplate.getRemoteFsRoot(),
+                agentTemplate.getNumExecutors());
     }
 
     @Test
@@ -137,7 +140,8 @@ public class ProxmoxCloudTest {
                 "jenkins",
                 null,
                 "proxmox",
-                "/home/jenkins");
+                "/home/jenkins",
+                1);
 
         assertEquals(
                 "jenkins-proxmox-plugin;jenkins-cloud-cloud-name-prod",
@@ -190,7 +194,8 @@ public class ProxmoxCloudTest {
                 "jenkins",
                 null,
                 "proxmox linux docker",
-                "/home/jenkins");
+                "/home/jenkins",
+                1);
 
         assertTrue(multiLabelCloud.canProvision(new LabelAtom("proxmox")));
         assertTrue(multiLabelCloud.canProvision(new LabelAtom("linux")));
@@ -268,9 +273,10 @@ public class ProxmoxCloudTest {
                 "jenkins",
                 null,
                 "proxmox",
-                "/home/jenkins");
+                "/home/jenkins",
+                1);
 
-        DumbSlave slave = buildDumbSlave(websocketCloud, "proxmox-agent-1", "101", null);
+        ProxmoxNode slave = buildDumbSlave(websocketCloud, "proxmox-agent-1", "101", null);
         ComputerLauncher nodeLauncher = slave.getLauncher();
 
         assertInstanceOf(JNLPLauncher.class, nodeLauncher);
@@ -298,9 +304,10 @@ public class ProxmoxCloudTest {
                 "jenkins",
                 null,
                 "proxmox",
-                "/home/jenkins");
+                "/home/jenkins",
+                1);
 
-        DumbSlave slave = buildDumbSlave(sshCloud, "proxmox-agent-1", "101", "192.0.2.10");
+        ProxmoxNode slave = buildDumbSlave(sshCloud, "proxmox-agent-1", "101", "192.0.2.10");
 
         assertInstanceOf(SSHLauncher.class, slave.getLauncher());
         assertEquals("192.0.2.10", ((SSHLauncher) slave.getLauncher()).getHost());
@@ -416,15 +423,101 @@ public class ProxmoxCloudTest {
     @WithJenkins
     public void testNodeConfigRoundTripBindsProxmoxRetentionStrategy(JenkinsRule jenkinsRule) throws Exception {
         proxmoxCloud.setMaxLifetimeMinutes(45);
-        DumbSlave slave = buildDumbSlave(proxmoxCloud, "proxmox-agent-1", "101", null);
+        ProxmoxNode slave = buildDumbSlave(proxmoxCloud, "proxmox-agent-1", "101", null);
         jenkinsRule.jenkins.addNode(slave);
 
-        DumbSlave reconfigured = (DumbSlave) jenkinsRule.configRoundtrip(slave);
+        ProxmoxNode reconfigured = (ProxmoxNode) jenkinsRule.configRoundtrip(slave);
         assertInstanceOf(ProxmoxRetentionStrategy.class, reconfigured.getRetentionStrategy());
 
         ProxmoxRetentionStrategy retention = (ProxmoxRetentionStrategy) reconfigured.getRetentionStrategy();
         assertEquals("Proxmox", retention.getCloudName());
         assertEquals("101", retention.getVmId());
+    }
+
+    @Test
+    @WithJenkins
+    public void testMaxBuildsDisplayNameShowsRemainingCount(JenkinsRule jenkinsRule) throws Exception {
+        proxmoxCloud.setMaxBuildsPerAgent(2);
+        ProxmoxNode slave = buildDumbSlave(proxmoxCloud, "max-builds-agent", "801", null);
+        jenkinsRule.jenkins.addNode(slave);
+
+        assertNotNull(slave.toComputer());
+        SlaveComputer computer = (SlaveComputer) Objects.requireNonNull(slave.toComputer());
+        Executor executor = computer.getExecutors().get(0);
+        ProxmoxRetentionStrategy retention = (ProxmoxRetentionStrategy) slave.getRetentionStrategy();
+
+        assertTrue(computer.getDisplayName().contains("2 builds remaining"));
+        retention.taskAccepted(executor, null);
+        assertTrue(computer.getDisplayName().contains("1 builds remaining"));
+    }
+
+    @Test
+    @WithJenkins
+    public void testMaxBuildsDisablesAgentImmediatelyOnFinalAssignment(JenkinsRule jenkinsRule) throws Exception {
+        proxmoxCloud.setMaxBuildsPerAgent(2);
+        ProxmoxNode slave = buildDumbSlave(proxmoxCloud, "max-builds-drain-agent", "802", null);
+        jenkinsRule.jenkins.addNode(slave);
+
+        assertNotNull(slave.toComputer());
+        SlaveComputer computer = (SlaveComputer) Objects.requireNonNull(slave.toComputer());
+        Executor executor = computer.getExecutors().get(0);
+        ProxmoxRetentionStrategy retention = (ProxmoxRetentionStrategy) slave.getRetentionStrategy();
+
+        retention.taskAccepted(executor, null);
+        assertTrue(computer.isAcceptingTasks());
+        assertEquals(1, slave.getBuildsRemaining());
+
+        retention.taskAccepted(executor, null);
+        assertFalse(computer.isAcceptingTasks());
+        assertTrue(computer.isTemporarilyOffline());
+        assertEquals(0, slave.getBuildsRemaining());
+    }
+
+    @Test
+    @WithJenkins
+    public void testStaleRemainingCounterDoesNotTriggerPrematureDrain(JenkinsRule jenkinsRule) throws Exception {
+        proxmoxCloud.setMaxBuildsPerAgent(3);
+        ProxmoxNode slave = buildDumbSlave(proxmoxCloud, "stale-counter-agent", "803", null);
+        jenkinsRule.jenkins.addNode(slave);
+
+        assertNotNull(slave.toComputer());
+        SlaveComputer computer = (SlaveComputer) Objects.requireNonNull(slave.toComputer());
+        ProxmoxRetentionStrategy retention = (ProxmoxRetentionStrategy) slave.getRetentionStrategy();
+
+        // Simulate stale state after reload; check() should heal this from actual build history.
+        slave.setBuildsRemaining(0);
+        retention.check(computer);
+
+        assertFalse(computer.isTemporarilyOffline());
+        assertTrue(computer.isAcceptingTasks());
+        assertEquals(3, slave.getBuildsRemaining());
+    }
+
+    @Test
+    @WithJenkins
+    public void testRemainingDecrementsWhenNodeSnapshotMaxIsUnset(JenkinsRule jenkinsRule) throws Exception {
+        ProxmoxRetentionStrategy retention =
+                new ProxmoxRetentionStrategy("Proxmox", "804", ProxmoxRetentionStrategy.DEFAULT_IDLE_MINUTES, 0, 2);
+        ProxmoxNode slave = new ProxmoxNode(
+                "unset-snapshot-max-agent",
+                "Proxmox provisioned agent (VM 804)",
+                "/home/jenkins",
+                1,
+                Node.Mode.NORMAL,
+                "proxmox",
+                new JNLPLauncher(),
+                retention,
+                0);
+        jenkinsRule.jenkins.addNode(slave);
+
+        assertNotNull(slave.toComputer());
+        SlaveComputer computer = (SlaveComputer) Objects.requireNonNull(slave.toComputer());
+        Executor executor = computer.getExecutors().get(0);
+
+        retention.taskAccepted(executor, null);
+
+        assertTrue(computer.getDisplayName().contains("1 builds remaining"));
+        assertEquals(1, slave.getBuildsRemaining());
     }
 
     @Test
@@ -448,15 +541,16 @@ public class ProxmoxCloudTest {
                 "jenkins",
                 null,
                 "proxmox",
-                "/home/jenkins");
+                "/home/jenkins",
+                1);
 
-        DumbSlave slave1 = buildDumbSlave(minCloud, "floor-agent-1", "201", null);
+        ProxmoxNode slave1 = buildDumbSlave(minCloud, "floor-agent-1", "201", null);
         jenkinsRule.jenkins.addNode(slave1);
 
         // Only 1 node; at the floor – should NOT allow termination.
         assertFalse(minCloud.canTerminateVmForScaleDown("201"));
 
-        DumbSlave slave2 = buildDumbSlave(minCloud, "floor-agent-2", "202", null);
+        ProxmoxNode slave2 = buildDumbSlave(minCloud, "floor-agent-2", "202", null);
         jenkinsRule.jenkins.addNode(slave2);
 
         // 2 nodes with floor=1 – can terminate one.
@@ -484,9 +578,10 @@ public class ProxmoxCloudTest {
                 "jenkins",
                 null,
                 "proxmox",
-                "/home/jenkins");
+                "/home/jenkins",
+                1);
 
-        DumbSlave slave = buildDumbSlave(noFloorCloud, "solo-agent", "301", null);
+        ProxmoxNode slave = buildDumbSlave(noFloorCloud, "solo-agent", "301", null);
         jenkinsRule.jenkins.addNode(slave);
 
         // minInstances=0 → always allow termination even with only 1 node.
@@ -515,9 +610,10 @@ public class ProxmoxCloudTest {
                 "jenkins",
                 null,
                 "proxmox",
-                "/home/jenkins");
+                "/home/jenkins",
+                1);
 
-        DumbSlave drainingNode = buildDumbSlave(minCloud, "draining-agent", "701", null);
+        ProxmoxNode drainingNode = buildDumbSlave(minCloud, "draining-agent", "701", null);
         jenkinsRule.jenkins.addNode(drainingNode);
         assertNotNull(drainingNode.toComputer());
         Objects.requireNonNull(drainingNode.toComputer())
@@ -530,7 +626,7 @@ public class ProxmoxCloudTest {
         // Draining node should not count toward minimum-floor healthy capacity.
         assertEquals(0, minCloud.countLiveCloudNodes());
 
-        DumbSlave replacementNode = buildDumbSlave(minCloud, "replacement-agent", "702", null);
+        ProxmoxNode replacementNode = buildDumbSlave(minCloud, "replacement-agent", "702", null);
         jenkinsRule.jenkins.addNode(replacementNode);
 
         // With one healthy replacement at min=1, draining VM should be eligible for termination.
@@ -559,7 +655,8 @@ public class ProxmoxCloudTest {
                 "jenkins",
                 null,
                 "proxmox",
-                "/home/jenkins");
+                "/home/jenkins",
+                1);
 
         ProxmoxCloud cloudB = new ProxmoxCloud(
                 "CloudB",
@@ -576,7 +673,8 @@ public class ProxmoxCloudTest {
                 "jenkins",
                 null,
                 "proxmox",
-                "/home/jenkins");
+                "/home/jenkins",
+                1);
 
         assertEquals(0, cloudA.countLiveCloudNodes());
 
@@ -610,7 +708,8 @@ public class ProxmoxCloudTest {
                 "jenkins",
                 null,
                 "proxmox",
-                "/home/jenkins");
+                "/home/jenkins",
+                1);
 
         jenkinsRule.jenkins.addNode(buildDumbSlave(minCloud, "r-agent-1", "501", null));
         jenkinsRule.jenkins.addNode(buildDumbSlave(minCloud, "r-agent-2", "502", null));
@@ -656,10 +755,10 @@ public class ProxmoxCloudTest {
                 .addCredentials(Domain.global(), credentials);
     }
 
-    private DumbSlave buildDumbSlave(ProxmoxCloud cloud, String agentName, String vmId, String ipAddress)
+    private ProxmoxNode buildDumbSlave(ProxmoxCloud cloud, String agentName, String vmId, String ipAddress)
             throws Exception {
         Method method = ProxmoxCloud.class.getDeclaredMethod("buildDumbSlave", String.class, String.class, String.class);
         method.setAccessible(true);
-        return (DumbSlave) method.invoke(cloud, agentName, vmId, ipAddress);
+        return (ProxmoxNode) method.invoke(cloud, agentName, vmId, ipAddress);
     }
 }
