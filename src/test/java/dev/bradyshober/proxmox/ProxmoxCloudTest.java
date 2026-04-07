@@ -19,8 +19,13 @@ import hudson.util.FormValidation;
 import hudson.util.ListBoxModel;
 import hudson.util.Secret;
 import java.io.IOException;
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.Objects;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.jenkinsci.plugins.plaincredentials.impl.StringCredentialsImpl;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -448,6 +453,81 @@ public class ProxmoxCloudTest {
     }
 
     @Test
+    public void testReadResolveRestoresTransientProvisioningState() throws Exception {
+        Field pendingField = ProxmoxCloud.class.getDeclaredField("pendingProvisions");
+        pendingField.setAccessible(true);
+        Field startupField = ProxmoxCloud.class.getDeclaredField("startupReconciled");
+        startupField.setAccessible(true);
+        Method readResolve = ProxmoxCloud.class.getDeclaredMethod("readResolve");
+        readResolve.setAccessible(true);
+
+        pendingField.set(proxmoxCloud, null);
+        startupField.setBoolean(proxmoxCloud, true);
+
+        Object resolved = readResolve.invoke(proxmoxCloud);
+
+        assertSame(proxmoxCloud, resolved);
+        assertInstanceOf(java.util.concurrent.atomic.AtomicInteger.class, pendingField.get(proxmoxCloud));
+        assertFalse(startupField.getBoolean(proxmoxCloud));
+    }
+
+    @Test
+    public void testVmIdReservationIsSharedAcrossCloudInstancesForSameTarget() throws Exception {
+        ProxmoxCloud secondCloud = new ProxmoxCloud(
+                "ProxmoxReloaded",
+                serverConfig.getHost(),
+                serverConfig.getApiTokenCredentialId(),
+                !serverConfig.isVerifySsl(),
+                serverConfig.getNode(),
+                agentTemplate.getTemplateVmId(),
+                agentTemplate.getAgentNameTemplate(),
+                agentTemplate.getMinInstances(),
+                agentTemplate.getMaxInstances(),
+                agentTemplate.getIdleMinutesBeforeTermination(),
+                agentTemplate.getLauncher(),
+                agentTemplate.getSshUsername(),
+                agentTemplate.getSshPublicKey(),
+                agentTemplate.getLabels(),
+                agentTemplate.getRemoteFsRoot(),
+                agentTemplate.getNumExecutors());
+
+        AtomicBoolean firstCloneReleased = new AtomicBoolean(false);
+        ProxmoxCloud.CloneReservation firstReservation = proxmoxCloud.reserveVmIdAndStartClone(
+                "agent-one",
+                () -> "500",
+                vmId -> "upid-" + vmId);
+
+        CompletableFuture<ProxmoxCloud.CloneReservation> secondReservationFuture = CompletableFuture.supplyAsync(() -> {
+            try {
+                return secondCloud.reserveVmIdAndStartClone(
+                        "agent-two",
+                        () -> firstCloneReleased.get() ? "501" : "500",
+                        vmId -> "upid-" + vmId);
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        });
+
+        Thread.sleep(300);
+        assertFalse(secondReservationFuture.isDone(), "Second allocation should wait while the stale VM ID is reserved");
+
+        firstCloneReleased.set(true);
+        releaseReservedVmId(proxmoxCloud, firstReservation.getVmId());
+
+        ProxmoxCloud.CloneReservation secondReservation;
+        try {
+            secondReservation = secondReservationFuture.get(5, TimeUnit.SECONDS);
+        } catch (ExecutionException e) {
+            throw new AssertionError("Concurrent allocation failed", e.getCause());
+        }
+
+        assertEquals("500", firstReservation.getVmId());
+        assertEquals("501", secondReservation.getVmId());
+
+        releaseReservedVmId(secondCloud, secondReservation.getVmId());
+    }
+
+    @Test
     @WithJenkins
     public void testMaxBuildsDisplayNameShowsRemainingCount(JenkinsRule jenkinsRule) throws Exception {
         proxmoxCloud.setMaxBuildsPerAgent(2);
@@ -462,6 +542,21 @@ public class ProxmoxCloudTest {
         assertTrue(computer.getDisplayName().contains("2 builds remaining"));
         retention.taskAccepted(executor, null);
         assertTrue(computer.getDisplayName().contains("1 builds remaining"));
+    }
+
+    @Test
+    @WithJenkins
+    public void testBuildEventBridgeHandlesRemovedNode(JenkinsRule jenkinsRule) throws Exception {
+        proxmoxCloud.setMaxBuildsPerAgent(1);
+        ProxmoxNode slave = buildDumbSlave(proxmoxCloud, "removed-node-agent", "901", null);
+        jenkinsRule.jenkins.addNode(slave);
+
+        SlaveComputer computer = (SlaveComputer) Objects.requireNonNull(slave.toComputer());
+        Executor executor = computer.getExecutors().get(0);
+
+        jenkinsRule.jenkins.removeNode(slave);
+
+        assertDoesNotThrow(() -> new ProxmoxRetentionStrategy.BuildEventBridge().taskAccepted(executor, null));
     }
 
     @Test
@@ -773,5 +868,11 @@ public class ProxmoxCloudTest {
         Method method = ProxmoxCloud.class.getDeclaredMethod("buildDumbSlave", String.class, String.class, String.class);
         method.setAccessible(true);
         return (ProxmoxNode) method.invoke(cloud, agentName, vmId, ipAddress);
+    }
+
+    private void releaseReservedVmId(ProxmoxCloud cloud, String vmId) throws Exception {
+        Method method = ProxmoxCloud.class.getDeclaredMethod("releaseReservedVmId", String.class);
+        method.setAccessible(true);
+        method.invoke(cloud, vmId);
     }
 }

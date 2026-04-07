@@ -1,16 +1,11 @@
 package dev.bradyshober.proxmox;
 
 import hudson.slaves.ComputerLauncher;
-import java.io.Serial;
-import java.io.Serializable;
 
 /**
  * Configuration for a Proxmox VM agent template.
  */
-public class ProxmoxAgentTemplate implements Serializable {
-    @Serial
-    private static final long serialVersionUID = 1L;
-
+public class ProxmoxAgentTemplate {
     private String templateVmId;
     private String agentNameTemplate;
     private int minInstances;

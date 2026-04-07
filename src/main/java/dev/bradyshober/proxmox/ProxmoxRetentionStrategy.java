@@ -36,8 +36,8 @@ public class ProxmoxRetentionStrategy extends RetentionStrategy<SlaveComputer> {
     /** Prefix used for temporary-offline reason while draining max-builds agents. */
     public static final String MAX_BUILDS_DRAIN_REASON_PREFIX = "Reached max build count of ";
 
-    private String cloudName;
-    private String vmId;
+    private volatile String cloudName;
+    private volatile String vmId;
     private int idleMinutes;
     private int maxLifetimeMinutes;
     private int maxBuildsPerAgent;
@@ -102,14 +102,16 @@ public class ProxmoxRetentionStrategy extends RetentionStrategy<SlaveComputer> {
             createdAtMillis = System.currentTimeMillis();
         }
 
+        String configuredCloudName = cloudName;
+        String configuredVmId = vmId;
         int effectiveIdleMinutes = idleMinutes;
         int effectiveMaxLifetimeMinutes = maxLifetimeMinutes;
         int effectiveMaxBuilds = maxBuildsPerAgent;
 
         Jenkins jenkinsInstance = Jenkins.getInstanceOrNull();
         ProxmoxCloud proxmoxCloud = null;
-        if (jenkinsInstance != null && cloudName != null && !cloudName.isBlank()) {
-            hudson.slaves.Cloud cloud = jenkinsInstance.clouds.getByName(cloudName);
+        if (jenkinsInstance != null && configuredCloudName != null && !configuredCloudName.isBlank()) {
+            hudson.slaves.Cloud cloud = jenkinsInstance.clouds.getByName(configuredCloudName);
             if (cloud instanceof ProxmoxCloud resolvedCloud) {
                 proxmoxCloud = resolvedCloud;
                 // Cloud-level policy is authoritative for lifecycle thresholds.
@@ -163,18 +165,18 @@ public class ProxmoxRetentionStrategy extends RetentionStrategy<SlaveComputer> {
         }
 
         if (jenkinsInstance != null) {
-            if (cloudName == null || cloudName.isBlank() || vmId == null || vmId.isBlank()) {
+            if (configuredCloudName == null || configuredCloudName.isBlank() || configuredVmId == null || configuredVmId.isBlank()) {
                 LOGGER.log(Level.WARNING, "Skipping VM termination because cloudName/vmId are not set on retention strategy");
                 return 1;
             }
 
             if (proxmoxCloud == null) {
-                LOGGER.log(Level.WARNING, "Could not find ProxmoxCloud '" + cloudName + "' for VM cleanup");
+                LOGGER.log(Level.WARNING, "Could not find ProxmoxCloud '" + configuredCloudName + "' for VM cleanup");
                 return 1;
             }
 
             // Minimum floor takes precedence: keep idle agents alive until replacement capacity exists.
-            if (!proxmoxCloud.canTerminateVmForScaleDown(vmId)) {
+            if (!proxmoxCloud.canTerminateVmForScaleDown(configuredVmId)) {
                 LOGGER.log(
                         Level.FINE,
                         "Skipping idle termination for " + computer.getName()
@@ -194,17 +196,17 @@ public class ProxmoxRetentionStrategy extends RetentionStrategy<SlaveComputer> {
             LOGGER.log(
                     Level.INFO,
                     "Agent " + computer.getName() + " idle for " + idleMinutesElapsed + " min (threshold "
-                            + effectiveIdleMinutes + " min); terminating VM " + vmId);
+                            + effectiveIdleMinutes + " min); terminating VM " + configuredVmId);
         } else if (maxBuildsExceeded) {
             LOGGER.log(
                     Level.INFO,
                     "Agent " + computer.getName() + " reached max build count and is now idle; terminating VM "
-                            + vmId);
+                            + configuredVmId);
         } else {
             LOGGER.log(
                     Level.INFO,
                     "Agent " + computer.getName() + " reached max lifetime of " + effectiveMaxLifetimeMinutes
-                            + " min and is now idle; terminating VM " + vmId);
+                            + " min and is now idle; terminating VM " + configuredVmId);
         }
 
         try {
@@ -215,7 +217,7 @@ public class ProxmoxRetentionStrategy extends RetentionStrategy<SlaveComputer> {
 
         // Locate the cloud and trigger VM termination when provenance is known.
         if (proxmoxCloud != null) {
-            proxmoxCloud.terminateInstance(vmId);
+            proxmoxCloud.terminateInstance(configuredVmId);
 
             // Remove the orphaned node from Jenkins
             try {
@@ -335,11 +337,11 @@ public class ProxmoxRetentionStrategy extends RetentionStrategy<SlaveComputer> {
             if (!(executor.getOwner() instanceof SlaveComputer computer)) {
                 return;
             }
-            if (!(computer.getNode() instanceof Slave)) {
+            Slave node = computer.getNode();
+            if (node == null) {
                 return;
             }
-            Slave slave = (Slave) computer.getNode();
-            if (!(slave.getRetentionStrategy() instanceof ProxmoxRetentionStrategy strategy)) {
+            if (!(node.getRetentionStrategy() instanceof ProxmoxRetentionStrategy strategy)) {
                 return;
             }
             callback.accept(strategy);

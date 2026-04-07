@@ -24,8 +24,12 @@ import java.io.Serial;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.Level;
@@ -44,6 +48,7 @@ public class ProxmoxCloud extends Cloud {
     private static final Logger LOGGER = Logger.getLogger(ProxmoxCloud.class.getName());
     private static final String PROVISIONED_BY_PLUGIN_TAG = "jenkins-proxmox-plugin";
     private static final String CLOUD_TAG_PREFIX = "jenkins-cloud-";
+    private static final ConcurrentMap<String, VmAllocationState> VM_ALLOCATION_STATES = new ConcurrentHashMap<>();
 
     @Serial
     private static final long serialVersionUID = 1L;
@@ -54,13 +59,35 @@ public class ProxmoxCloud extends Cloud {
     private transient ProxmoxClient proxmoxClient;
     /** Tracks async provisions in-flight so the reconciler doesn't over-provision. */
     private transient AtomicInteger pendingProvisions;
-    /**
-     * Guards the {@code getNextVmId → cloneVm} sequence so that concurrent provisioning
-     * threads cannot obtain the same VM ID from Proxmox before any clone has been submitted.
-     */
-    private transient volatile Object vmAllocationLock;
     /** Ensures we reconcile tagged VMs from Proxmox before new provisioning proceeds. */
     private transient volatile boolean startupReconciled;
+
+    private static final class VmAllocationState {
+        private final Set<String> reservedVmIds = new HashSet<>();
+    }
+
+    static final class CloneReservation {
+        private final String vmId;
+        private final String upidClone;
+
+        CloneReservation(String vmId, String upidClone) {
+            this.vmId = vmId;
+            this.upidClone = upidClone;
+        }
+
+        String getVmId() {
+            return vmId;
+        }
+
+        String getUpidClone() {
+            return upidClone;
+        }
+    }
+
+    @FunctionalInterface
+    interface CloneStarter {
+        String startClone(String vmId) throws Exception;
+    }
 
     @DataBoundConstructor
     public ProxmoxCloud(
@@ -101,6 +128,7 @@ public class ProxmoxCloud extends Cloud {
                         : ProxmoxRetentionStrategy.DEFAULT_IDLE_MINUTES);
         agentTemplate.setNumExecutors(Math.max(1, numExecutors));
         this.instances = Collections.synchronizedList(new ArrayList<>());
+        initTransientState();
     }
 
     private static ComputerLauncher defaultLauncher() {
@@ -109,28 +137,95 @@ public class ProxmoxCloud extends Cloud {
         return launcher;
     }
 
+    private void initTransientState() {
+        getPendingProvisions();
+    }
+
+    @Serial
+    private Object readResolve() {
+        proxmoxClient = null;
+        startupReconciled = false;
+        initTransientState();
+        return this;
+    }
+
     /** Lazily initialise the transient pending-provisions counter (survives XStream round-trip). */
-    private AtomicInteger getPendingProvisions() {
+    private synchronized AtomicInteger getPendingProvisions() {
         if (pendingProvisions == null) {
-            synchronized (this) {
-                if (pendingProvisions == null) {
-                    pendingProvisions = new AtomicInteger(0);
-                }
-            }
+            pendingProvisions = new AtomicInteger(0);
         }
         return pendingProvisions;
     }
 
-    /** Lazily initialise the VM-allocation lock (survives XStream round-trip). */
-    private Object getVmAllocationLock() {
-        if (vmAllocationLock == null) {
-            synchronized (this) {
-                if (vmAllocationLock == null) {
-                    vmAllocationLock = new Object();
+    private String getVmAllocationScopeKey() {
+        String host = serverConfig.getHost() == null ? "" : serverConfig.getHost().trim().toLowerCase(Locale.ROOT);
+        String node = serverConfig.getNode() == null ? "" : serverConfig.getNode().trim().toLowerCase(Locale.ROOT);
+        return host + "|" + node;
+    }
+
+    private VmAllocationState getVmAllocationState() {
+        return VM_ALLOCATION_STATES.computeIfAbsent(getVmAllocationScopeKey(), unused -> new VmAllocationState());
+    }
+
+    CloneReservation reserveVmIdAndStartClone(
+            String agentName, java.util.concurrent.Callable<String> nextVmIdSupplier, CloneStarter cloneStarter)
+            throws Exception {
+        VmAllocationState allocationState = getVmAllocationState();
+        String allocationScope = getVmAllocationScopeKey();
+
+        synchronized (allocationState) {
+            for (int attempt = 1; attempt <= 25; attempt++) {
+                String vmId = nextVmIdSupplier.call();
+                if (vmId == null || vmId.isBlank()) {
+                    throw new IOException("Proxmox returned a blank VM ID for cloud '" + name + "'");
+                }
+
+                if (allocationState.reservedVmIds.contains(vmId)) {
+                    LOGGER.log(
+                            Level.FINE,
+                            "VM ID {0} is already reserved for Proxmox allocation scope {1}; waiting to retry (attempt {2})",
+                            new Object[] {vmId, allocationScope, attempt});
+                    allocationState.wait(200L);
+                    continue;
+                }
+
+                allocationState.reservedVmIds.add(vmId);
+                try {
+                    LOGGER.log(Level.FINE, "Allocated VM ID from Proxmox for {0}: {1}", new Object[] {agentName, vmId});
+                    String upidClone = cloneStarter.startClone(vmId);
+                    LOGGER.log(Level.FINE, "Clone task started for VM {0}: {1}", new Object[] {vmId, upidClone});
+                    return new CloneReservation(vmId, upidClone);
+                } catch (Exception e) {
+                    allocationState.reservedVmIds.remove(vmId);
+                    allocationState.notifyAll();
+                    throw e;
                 }
             }
         }
-        return vmAllocationLock;
+
+        throw new IOException(
+                "Timed out waiting for a unique Proxmox VM ID for allocation scope '" + allocationScope + "'");
+    }
+
+    private CloneReservation reserveVmIdAndStartClone(String agentName) throws Exception {
+        String templateVmId = agentTemplate.getTemplateVmId();
+        return reserveVmIdAndStartClone(
+                agentName,
+                () -> proxmoxClient.getNextVmId(),
+                vmId -> proxmoxClient.cloneVmWithCloudInit(templateVmId, vmId, agentName, null));
+    }
+
+    private void releaseReservedVmId(String vmId) {
+        if (vmId == null || vmId.isBlank()) {
+            return;
+        }
+
+        VmAllocationState allocationState = getVmAllocationState();
+        synchronized (allocationState) {
+            if (allocationState.reservedVmIds.remove(vmId)) {
+                allocationState.notifyAll();
+            }
+        }
     }
 
     /**
@@ -300,106 +395,112 @@ public class ProxmoxCloud extends Cloud {
         // calling getNextVmId() before any clone has been registered in Proxmox,
         // which would cause every thread to receive the same ID.
         // -----------------------------------------------------------------------
-        String vmId;
-        String upidClone;
-        String templateVmId = agentTemplate.getTemplateVmId();
-        synchronized (getVmAllocationLock()) {
-            vmId = proxmoxClient.getNextVmId();
-            LOGGER.log(Level.FINE, "Allocated VM ID from Proxmox for " + agentName + ": " + vmId);
-            upidClone = proxmoxClient.cloneVmWithCloudInit(templateVmId, vmId, agentName, null);
-            LOGGER.log(Level.FINE, "Clone task started for VM " + vmId + ": " + upidClone);
-        }
+        String vmId = null;
+        boolean vmIdReserved = false;
+        CloneReservation cloneReservation = reserveVmIdAndStartClone(agentName);
+        vmId = cloneReservation.getVmId();
+        String upidClone = cloneReservation.getUpidClone();
+        vmIdReserved = true;
 
-        // Pre-register the Jenkins node now that the real vmId is known.
-        // This must happen before the VM boots so Jenkins can accept the inbound connection.
-        ProxmoxNode preRegisteredNode = null;
-        if (inboundLauncher) {
-            preRegisteredNode = buildDumbSlave(agentName, vmId, null);
-            Jenkins.get().addNode(preRegisteredNode);
-            LOGGER.log(Level.INFO, "Pre-registered Jenkins node for inbound agent: " + agentName);
-        }
-
-
-        // Track this instance
-        ProxmoxInstance instance = new ProxmoxInstance(vmId, agentName);
-        instance.setUpidTaskId(upidClone);
-        instances.add(instance);
-
-        // Wait for clone task to complete
-        waitForTaskCompletion("clone", vmId, upidClone);
-        instance.setState(ProxmoxInstance.InstanceState.STARTING);
-
-        // Configure cloud-init on the cloned VM: create the agent user, inject the SSH
-        // public key into authorized_keys, and request DHCP on the primary NIC.
-        // Requires the template to have a cloud-init drive attached.
         try {
-            proxmoxClient.configureVmCloudInit(
-                    vmId,
-                    agentTemplate.getSshUsername(),
-                    agentTemplate.getSshPublicKey(),
-                    buildProvisioningTags());
-        } catch (Exception e) {
-            LOGGER.log(
-                    Level.WARNING,
-                    "Could not configure cloud-init params for VM " + vmId + "; continuing anyway. Error: "
-                            + e.getMessage());
-        }
+            // Pre-register the Jenkins node now that the real vmId is known.
+            // This must happen before the VM boots so Jenkins can accept the inbound connection.
+            ProxmoxNode preRegisteredNode = null;
+            if (inboundLauncher) {
+                preRegisteredNode = buildDumbSlave(agentName, vmId, null);
+                Jenkins.get().addNode(preRegisteredNode);
+                LOGGER.log(Level.INFO, "Pre-registered Jenkins node for inbound agent: " + agentName);
+            }
 
-        // Start the VM
-        String upidStart = proxmoxClient.startVm(vmId);
-        LOGGER.log(Level.FINE, "Start task initiated for VM " + vmId + ": " + upidStart);
 
-        // Wait for VM to start
-        waitForTaskCompletion("start", vmId, upidStart);
-        instance.setState(ProxmoxInstance.InstanceState.RUNNING);
-        LOGGER.log(Level.INFO, "VM provisioned and started: " + agentName);
+            // Track this instance
+            ProxmoxInstance instance = new ProxmoxInstance(vmId, agentName);
+            instance.setUpidTaskId(upidClone);
+            instances.add(instance);
 
-        // -----------------------------------------------------------------------
-        // WebSocket / JNLP inbound: write the agent service file with the JNLP
-        // secret via QEMU guest agent, then start the service.
-        // Requires qemu-guest-agent and Java to be pre-installed in the template.
-        // -----------------------------------------------------------------------
-        if (inboundLauncher && jnlpSecret != null) {
-            String serviceContent = buildJenkinsAgentServiceContent(agentName, jnlpSecret);
-            LOGGER.log(Level.FINE, "Waiting for QEMU guest agent on VM " + vmId);
-            proxmoxClient.waitForGuestAgent(vmId);
+            // Wait for clone task to complete
+            waitForTaskCompletion("clone", vmId, upidClone);
+            releaseReservedVmId(vmId);
+            vmIdReserved = false;
+            instance.setState(ProxmoxInstance.InstanceState.STARTING);
 
-            // Download agent.jar from Jenkins before writing the service file.
-            downloadAgentJar(proxmoxClient, vmId);
-
-            proxmoxClient.writeFileViaGuestAgent(vmId, "/etc/systemd/system/jenkins-agent.service", serviceContent);
-            LOGGER.log(Level.FINE, "Wrote jenkins-agent.service to VM " + vmId + " via guest agent");
-
-            // Validate unit syntax early so provisioning logs include the parse error.
-            proxmoxClient.execCommandViaGuestAgent(
-                    vmId, "systemd-analyze", "verify", "/etc/systemd/system/jenkins-agent.service");
-            proxmoxClient.execCommandViaGuestAgent(vmId, "systemctl", "daemon-reload");
-            proxmoxClient.execCommandViaGuestAgent(vmId, "systemctl", "enable", "--now", "jenkins-agent.service");
-            proxmoxClient.execCommandViaGuestAgent(vmId, "systemctl", "is-active", "jenkins-agent.service");
-            LOGGER.log(Level.INFO, "Started jenkins-agent.service on VM " + vmId + "; waiting for inbound connection");
-            return preRegisteredNode;
-        }
-
-        // -----------------------------------------------------------------------
-        // SSH mode: resolve IP via QEMU guest agent, then create + return the node.
-        // -----------------------------------------------------------------------
-        if (sshLauncher) {
-            LOGGER.log(Level.FINE, "Resolving IP address for VM " + vmId + " via QEMU guest agent");
+            // Configure cloud-init on the cloned VM: create the agent user, inject the SSH
+            // public key into authorized_keys, and request DHCP on the primary NIC.
+            // Requires the template to have a cloud-init drive attached.
             try {
-                String ipAddress = proxmoxClient.getVmIpAddress(vmId);
-                instance.setIpAddress(ipAddress);
-                LOGGER.log(Level.INFO, "Resolved VM " + vmId + " IP address: " + ipAddress);
+                proxmoxClient.configureVmCloudInit(
+                        vmId,
+                        agentTemplate.getSshUsername(),
+                        agentTemplate.getSshPublicKey(),
+                        buildProvisioningTags());
             } catch (Exception e) {
                 LOGGER.log(
                         Level.WARNING,
-                        "Could not resolve VM IP address via guest agent; "
-                                + "the SSH launcher may not be able to connect. Error: " + e.getMessage());
+                        "Could not configure cloud-init params for VM " + vmId + "; continuing anyway. Error: "
+                                + e.getMessage());
             }
-            return buildDumbSlave(agentName, vmId, instance.getIpAddress());
-        }
 
-        // Fallback – should not normally be reached
-        return buildDumbSlave(agentName, vmId, null);
+            // Start the VM
+            String upidStart = proxmoxClient.startVm(vmId);
+            LOGGER.log(Level.FINE, "Start task initiated for VM " + vmId + ": " + upidStart);
+
+            // Wait for VM to start
+            waitForTaskCompletion("start", vmId, upidStart);
+            instance.setState(ProxmoxInstance.InstanceState.RUNNING);
+            LOGGER.log(Level.INFO, "VM provisioned and started: " + agentName);
+
+            // -----------------------------------------------------------------------
+            // WebSocket / JNLP inbound: write the agent service file with the JNLP
+            // secret via QEMU guest agent, then start the service.
+            // Requires qemu-guest-agent and Java to be pre-installed in the template.
+            // -----------------------------------------------------------------------
+            if (inboundLauncher && jnlpSecret != null) {
+                String serviceContent = buildJenkinsAgentServiceContent(agentName, jnlpSecret);
+                LOGGER.log(Level.FINE, "Waiting for QEMU guest agent on VM " + vmId);
+                proxmoxClient.waitForGuestAgent(vmId);
+
+                // Download agent.jar from Jenkins before writing the service file.
+                downloadAgentJar(proxmoxClient, vmId);
+
+                proxmoxClient.writeFileViaGuestAgent(vmId, "/etc/systemd/system/jenkins-agent.service", serviceContent);
+                LOGGER.log(Level.FINE, "Wrote jenkins-agent.service to VM " + vmId + " via guest agent");
+
+                // Validate unit syntax early so provisioning logs include the parse error.
+                proxmoxClient.execCommandViaGuestAgent(
+                        vmId, "systemd-analyze", "verify", "/etc/systemd/system/jenkins-agent.service");
+                proxmoxClient.execCommandViaGuestAgent(vmId, "systemctl", "daemon-reload");
+                proxmoxClient.execCommandViaGuestAgent(vmId, "systemctl", "enable", "--now", "jenkins-agent.service");
+                proxmoxClient.execCommandViaGuestAgent(vmId, "systemctl", "is-active", "jenkins-agent.service");
+                LOGGER.log(Level.INFO, "Started jenkins-agent.service on VM " + vmId + "; waiting for inbound connection");
+                return preRegisteredNode;
+            }
+
+            // -----------------------------------------------------------------------
+            // SSH mode: resolve IP via QEMU guest agent, then create + return the node.
+            // -----------------------------------------------------------------------
+            if (sshLauncher) {
+                LOGGER.log(Level.FINE, "Resolving IP address for VM " + vmId + " via QEMU guest agent");
+                try {
+                    String ipAddress = proxmoxClient.getVmIpAddress(vmId);
+                    instance.setIpAddress(ipAddress);
+                    LOGGER.log(Level.INFO, "Resolved VM " + vmId + " IP address: " + ipAddress);
+                } catch (Exception e) {
+                    LOGGER.log(
+                            Level.WARNING,
+                            "Could not resolve VM IP address via guest agent; "
+                                    + "the SSH launcher may not be able to connect. Error: " + e.getMessage());
+                }
+                return buildDumbSlave(agentName, vmId, instance.getIpAddress());
+            }
+
+            // Fallback – should not normally be reached
+            return buildDumbSlave(agentName, vmId, null);
+        } catch (Exception e) {
+            if (vmIdReserved) {
+                releaseReservedVmId(vmId);
+            }
+            throw e;
+        }
     }
 
     /**
