@@ -27,4 +27,3 @@ public class ProxmoxNodeComputer extends SlaveComputer {
         return node.getDisplayName();
     }
 }
-

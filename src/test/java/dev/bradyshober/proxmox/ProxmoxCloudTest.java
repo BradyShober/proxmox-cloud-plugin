@@ -148,9 +148,7 @@ public class ProxmoxCloudTest {
                 "/home/jenkins",
                 1);
 
-        assertEquals(
-                "jenkins-proxmox-plugin;jenkins-cloud-cloud-name-prod",
-                namedCloud.buildProvisioningTags());
+        assertEquals("jenkins-proxmox-plugin;jenkins-cloud-cloud-name-prod", namedCloud.buildProvisioningTags());
     }
 
     @Test
@@ -345,9 +343,8 @@ public class ProxmoxCloudTest {
     public void testResolveApiTokenRejectsLegacySecretTextCredential(JenkinsRule jenkinsRule) throws Exception {
         addSecretTextCredential(jenkinsRule, "legacy-proxmox-api-token", "user@pam!tokenid=token-secret");
 
-        IOException exception = assertThrows(
-                IOException.class,
-                () -> ProxmoxClient.resolveApiToken("legacy-proxmox-api-token"));
+        IOException exception =
+                assertThrows(IOException.class, () -> ProxmoxClient.resolveApiToken("legacy-proxmox-api-token"));
 
         assertTrue(exception.getMessage().contains("Unable to find Proxmox API token credential"));
     }
@@ -492,24 +489,21 @@ public class ProxmoxCloudTest {
                 agentTemplate.getNumExecutors());
 
         AtomicBoolean firstCloneReleased = new AtomicBoolean(false);
-        ProxmoxCloud.CloneReservation firstReservation = proxmoxCloud.reserveVmIdAndStartClone(
-                "agent-one",
-                () -> "500",
-                vmId -> "upid-" + vmId);
+        ProxmoxCloud.CloneReservation firstReservation =
+                proxmoxCloud.reserveVmIdAndStartClone("agent-one", () -> "500", vmId -> "upid-" + vmId);
 
         CompletableFuture<ProxmoxCloud.CloneReservation> secondReservationFuture = CompletableFuture.supplyAsync(() -> {
             try {
                 return secondCloud.reserveVmIdAndStartClone(
-                        "agent-two",
-                        () -> firstCloneReleased.get() ? "501" : "500",
-                        vmId -> "upid-" + vmId);
+                        "agent-two", () -> firstCloneReleased.get() ? "501" : "500", vmId -> "upid-" + vmId);
             } catch (Exception e) {
                 throw new RuntimeException(e);
             }
         });
 
         Thread.sleep(300);
-        assertFalse(secondReservationFuture.isDone(), "Second allocation should wait while the stale VM ID is reserved");
+        assertFalse(
+                secondReservationFuture.isDone(), "Second allocation should wait while the stale VM ID is reserved");
 
         firstCloneReleased.set(true);
         releaseReservedVmId(proxmoxCloud, firstReservation.getVmId());
@@ -727,9 +721,8 @@ public class ProxmoxCloudTest {
         Objects.requireNonNull(drainingNode.toComputer())
                 .setTemporarilyOffline(
                         true,
-                        new OfflineCause.ByCLI(
-                                ProxmoxRetentionStrategy.MAX_LIFETIME_DRAIN_REASON_PREFIX
-                                        + "5 minutes; draining running jobs before termination"));
+                        new OfflineCause.ByCLI(ProxmoxRetentionStrategy.MAX_LIFETIME_DRAIN_REASON_PREFIX
+                                + "5 minutes; draining running jobs before termination"));
 
         // Draining node should not count toward minimum-floor healthy capacity.
         assertEquals(0, minCloud.countLiveCloudNodes());
@@ -842,12 +835,7 @@ public class ProxmoxCloudTest {
     }
 
     private void addProxmoxApiTokenCredential(
-            JenkinsRule jenkinsRule,
-            String id,
-            String username,
-            String realm,
-            String tokenId,
-            String tokenSecret)
+            JenkinsRule jenkinsRule, String id, String username, String realm, String tokenId, String tokenSecret)
             throws Exception {
         ProxmoxApiTokenCredentialsImpl credentials = new ProxmoxApiTokenCredentialsImpl(
                 CredentialsScope.GLOBAL,
@@ -865,7 +853,8 @@ public class ProxmoxCloudTest {
 
     private ProxmoxNode buildDumbSlave(ProxmoxCloud cloud, String agentName, String vmId, String ipAddress)
             throws Exception {
-        Method method = ProxmoxCloud.class.getDeclaredMethod("buildDumbSlave", String.class, String.class, String.class);
+        Method method =
+                ProxmoxCloud.class.getDeclaredMethod("buildDumbSlave", String.class, String.class, String.class);
         method.setAccessible(true);
         return (ProxmoxNode) method.invoke(cloud, agentName, vmId, ipAddress);
     }

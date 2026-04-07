@@ -1,7 +1,7 @@
 package dev.bradyshober.proxmox;
 
-import com.cloudbees.plugins.credentials.CredentialsScope;
 import com.cloudbees.plugins.credentials.CredentialsDescriptor;
+import com.cloudbees.plugins.credentials.CredentialsScope;
 import com.cloudbees.plugins.credentials.impl.BaseStandardCredentials;
 import hudson.Extension;
 import hudson.util.ListBoxModel;
@@ -67,9 +67,7 @@ public class ProxmoxApiTokenCredentialsImpl extends BaseStandardCredentials impl
             items.add("ldap", "ldap");
             items.add("ad", "ad");
             items.add("openid", "openid");
-            if (value != null
-                    && !value.isBlank()
-                    && items.stream().noneMatch(option -> value.equals(option.value))) {
+            if (value != null && !value.isBlank() && items.stream().noneMatch(option -> value.equals(option.value))) {
                 items.add(value, value);
             }
             return items;
@@ -81,6 +79,3 @@ public class ProxmoxApiTokenCredentialsImpl extends BaseStandardCredentials impl
         }
     }
 }
-
-
-

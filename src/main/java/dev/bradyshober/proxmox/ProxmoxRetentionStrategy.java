@@ -165,8 +165,13 @@ public class ProxmoxRetentionStrategy extends RetentionStrategy<SlaveComputer> {
         }
 
         if (jenkinsInstance != null) {
-            if (configuredCloudName == null || configuredCloudName.isBlank() || configuredVmId == null || configuredVmId.isBlank()) {
-                LOGGER.log(Level.WARNING, "Skipping VM termination because cloudName/vmId are not set on retention strategy");
+            if (configuredCloudName == null
+                    || configuredCloudName.isBlank()
+                    || configuredVmId == null
+                    || configuredVmId.isBlank()) {
+                LOGGER.log(
+                        Level.WARNING,
+                        "Skipping VM termination because cloudName/vmId are not set on retention strategy");
                 return 1;
             }
 
@@ -330,10 +335,12 @@ public class ProxmoxRetentionStrategy extends RetentionStrategy<SlaveComputer> {
 
         @Override
         public void taskCompletedWithProblems(Executor executor, Queue.Task task, long durationMS, Throwable problems) {
-            withStrategy(executor, strategy -> strategy.taskCompletedWithProblems(executor, task, durationMS, problems));
+            withStrategy(
+                    executor, strategy -> strategy.taskCompletedWithProblems(executor, task, durationMS, problems));
         }
 
-        private static void withStrategy(Executor executor, java.util.function.Consumer<ProxmoxRetentionStrategy> callback) {
+        private static void withStrategy(
+                Executor executor, java.util.function.Consumer<ProxmoxRetentionStrategy> callback) {
             if (!(executor.getOwner() instanceof SlaveComputer computer)) {
                 return;
             }
@@ -347,7 +354,6 @@ public class ProxmoxRetentionStrategy extends RetentionStrategy<SlaveComputer> {
             callback.accept(strategy);
         }
     }
-
 
     @Extension
     public static class DescriptorImpl extends Descriptor<RetentionStrategy<?>> {

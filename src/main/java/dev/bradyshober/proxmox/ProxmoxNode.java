@@ -87,7 +87,16 @@ public class ProxmoxNode extends Slave implements EphemeralNode {
             int maxBuildsPerAgent)
             throws IOException, Descriptor.FormException {
         //noinspection deprecation
-        super(nodeName, nodeDescription, remoteFs, numExecutors, mode, label, launcher, retentionStrategy, nodeProperties);
+        super(
+                nodeName,
+                nodeDescription,
+                remoteFs,
+                numExecutors,
+                mode,
+                label,
+                launcher,
+                retentionStrategy,
+                nodeProperties);
         this.maxBuildsPerAgent = Math.max(0, maxBuildsPerAgent);
         this.buildsRemaining = this.maxBuildsPerAgent > 0 ? this.maxBuildsPerAgent : -1;
     }
@@ -194,9 +203,3 @@ public class ProxmoxNode extends Slave implements EphemeralNode {
         }
     }
 }
-
-
-
-
-
-

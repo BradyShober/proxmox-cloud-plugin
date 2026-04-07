@@ -42,5 +42,3 @@ public class ProxmoxSlave {
         return baseName + " (" + remaining + " builds remaining)";
     }
 }
-
-

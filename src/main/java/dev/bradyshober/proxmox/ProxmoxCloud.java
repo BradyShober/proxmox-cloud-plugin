@@ -158,8 +158,12 @@ public class ProxmoxCloud extends Cloud {
     }
 
     private String getVmAllocationScopeKey() {
-        String host = serverConfig.getHost() == null ? "" : serverConfig.getHost().trim().toLowerCase(Locale.ROOT);
-        String node = serverConfig.getNode() == null ? "" : serverConfig.getNode().trim().toLowerCase(Locale.ROOT);
+        String host = serverConfig.getHost() == null
+                ? ""
+                : serverConfig.getHost().trim().toLowerCase(Locale.ROOT);
+        String node = serverConfig.getNode() == null
+                ? ""
+                : serverConfig.getNode().trim().toLowerCase(Locale.ROOT);
         return host + "|" + node;
     }
 
@@ -313,7 +317,8 @@ public class ProxmoxCloud extends Cloud {
             // Check current instance count against max.
             // Use the live Jenkins node count (more accurate than the in-memory list after restarts)
             // plus any in-flight provisions from the reconciler to avoid over-provisioning.
-            int currentCount = Math.max(instances.size(),
+            int currentCount = Math.max(
+                    instances.size(),
                     countLiveCloudNodes() + getPendingProvisions().get());
             int maxInstances = agentTemplate.getMaxInstances();
             int availableCapacity = maxInstances - currentCount;
@@ -352,8 +357,7 @@ public class ProxmoxCloud extends Cloud {
                                 return null;
                             }
                         }),
-                        agentTemplate.getNumExecutors()
-                        );
+                        agentTemplate.getNumExecutors());
 
                 plannedNodes.add(plannedNode);
             }
@@ -412,7 +416,6 @@ public class ProxmoxCloud extends Cloud {
                 LOGGER.log(Level.INFO, "Pre-registered Jenkins node for inbound agent: " + agentName);
             }
 
-
             // Track this instance
             ProxmoxInstance instance = new ProxmoxInstance(vmId, agentName);
             instance.setUpidTaskId(upidClone);
@@ -429,10 +432,7 @@ public class ProxmoxCloud extends Cloud {
             // Requires the template to have a cloud-init drive attached.
             try {
                 proxmoxClient.configureVmCloudInit(
-                        vmId,
-                        agentTemplate.getSshUsername(),
-                        agentTemplate.getSshPublicKey(),
-                        buildProvisioningTags());
+                        vmId, agentTemplate.getSshUsername(), agentTemplate.getSshPublicKey(), buildProvisioningTags());
             } catch (Exception e) {
                 LOGGER.log(
                         Level.WARNING,
@@ -471,7 +471,8 @@ public class ProxmoxCloud extends Cloud {
                 proxmoxClient.execCommandViaGuestAgent(vmId, "systemctl", "daemon-reload");
                 proxmoxClient.execCommandViaGuestAgent(vmId, "systemctl", "enable", "--now", "jenkins-agent.service");
                 proxmoxClient.execCommandViaGuestAgent(vmId, "systemctl", "is-active", "jenkins-agent.service");
-                LOGGER.log(Level.INFO, "Started jenkins-agent.service on VM " + vmId + "; waiting for inbound connection");
+                LOGGER.log(
+                        Level.INFO, "Started jenkins-agent.service on VM " + vmId + "; waiting for inbound connection");
                 return preRegisteredNode;
             }
 
@@ -542,7 +543,7 @@ public class ProxmoxCloud extends Cloud {
      * @param ipAddress resolved IP address for SSH connections; may be {@code null} for
      *                  WebSocket/inbound agents
      */
-      private ProxmoxNode buildDumbSlave(String agentName, String vmId, String ipAddress) throws Exception {
+    private ProxmoxNode buildDumbSlave(String agentName, String vmId, String ipAddress) throws Exception {
         ComputerLauncher launcher = buildNodeLauncher(ipAddress);
 
         return new ProxmoxNode(
@@ -606,9 +607,8 @@ public class ProxmoxCloud extends Cloud {
     }
 
     String buildCloudOwnershipTag() {
-        String sanitizedCloudName = name == null
-                ? ""
-                : name.trim().toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9_.-]", "-");
+        String sanitizedCloudName =
+                name == null ? "" : name.trim().toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9_.-]", "-");
         sanitizedCloudName = sanitizedCloudName.replaceAll("-+", "-").replaceAll("^-|-$", "");
         if (sanitizedCloudName.isBlank()) {
             sanitizedCloudName = "default";
@@ -679,7 +679,9 @@ public class ProxmoxCloud extends Cloud {
 
             String status = vm.getStatus() == null ? "" : vm.getStatus().toLowerCase(Locale.ROOT);
             if (!("running".equals(status) || "starting".equals(status))) {
-                LOGGER.log(Level.FINE, "Skipping VM " + vmId + " during reconciliation because status is '" + status + "'");
+                LOGGER.log(
+                        Level.FINE,
+                        "Skipping VM " + vmId + " during reconciliation because status is '" + status + "'");
                 continue;
             }
 
@@ -821,35 +823,36 @@ public class ProxmoxCloud extends Cloud {
         LOGGER.log(Level.FINE, "Downloading agent.jar from " + agentJarUrl + " onto VM " + vmId);
 
         // Ensure destination path exists before download attempts.
-        //client.execCommandViaGuestAgent(vmId, "mkdir", "-p", destDir);
+        // client.execCommandViaGuestAgent(vmId, "mkdir", "-p", destDir);
 
         // Prefer wget because some templates do not include curl.
-        boolean downloaded = tryDownloadWithRetries(client, vmId, agentJarUrl, destPath, "wget", "-O", destPath, agentJarUrl)
-                || tryDownloadWithRetries(
-                        client,
-                        vmId,
-                        agentJarUrl,
-                        destPath,
-                        "wget",
-                        "--no-check-certificate",
-                        "-O",
-                        destPath,
-                        agentJarUrl)
-                || tryDownloadWithRetries(
-                        client,
-                        vmId,
-                        agentJarUrl,
-                        destPath,
-                        "curl",
-                        "-fsSL",
-                        "--insecure",
-                        "-o",
-                        destPath,
-                        agentJarUrl);
+        boolean downloaded =
+                tryDownloadWithRetries(client, vmId, agentJarUrl, destPath, "wget", "-O", destPath, agentJarUrl)
+                        || tryDownloadWithRetries(
+                                client,
+                                vmId,
+                                agentJarUrl,
+                                destPath,
+                                "wget",
+                                "--no-check-certificate",
+                                "-O",
+                                destPath,
+                                agentJarUrl)
+                        || tryDownloadWithRetries(
+                                client,
+                                vmId,
+                                agentJarUrl,
+                                destPath,
+                                "curl",
+                                "-fsSL",
+                                "--insecure",
+                                "-o",
+                                destPath,
+                                agentJarUrl);
 
         if (!downloaded) {
-            throw new IOException("Unable to download agent.jar to VM " + vmId
-                    + " after retries using wget/curl. URL=" + agentJarUrl);
+            throw new IOException("Unable to download agent.jar to VM " + vmId + " after retries using wget/curl. URL="
+                    + agentJarUrl);
         }
 
         // Verify file is non-empty and readable by service user.
@@ -868,8 +871,8 @@ public class ProxmoxCloud extends Cloud {
                 client.execCommandViaGuestAgent(vmId, commandAndArgs);
                 LOGGER.log(
                         Level.FINE,
-                        "agent.jar download succeeded on VM " + vmId + " using " + commandAndArgs[0]
-                                + " (attempt " + attempt + ")");
+                        "agent.jar download succeeded on VM " + vmId + " using " + commandAndArgs[0] + " (attempt "
+                                + attempt + ")");
                 return true;
             } catch (Exception e) {
                 LOGGER.log(
@@ -905,7 +908,7 @@ public class ProxmoxCloud extends Cloud {
                 + " -secret " + jnlpSecret
                 + " -webSocket"
                 + " -workDir /home/jenkins";
-        
+
         StringBuilder sb = new StringBuilder();
         sb.append("[Unit]\n");
         sb.append("Description=Jenkins Agent\n");
@@ -924,7 +927,7 @@ public class ProxmoxCloud extends Cloud {
         sb.append("\n");
         sb.append("[Install]\n");
         sb.append("WantedBy=multi-user.target\n");
-        
+
         return sb.toString();
     }
 
@@ -955,9 +958,7 @@ public class ProxmoxCloud extends Cloud {
             return; // Already at or above the floor.
         }
 
-        int deficit = Math.min(
-                minInstances - effectiveCount,
-                agentTemplate.getMaxInstances() - effectiveCount);
+        int deficit = Math.min(minInstances - effectiveCount, agentTemplate.getMaxInstances() - effectiveCount);
         if (deficit <= 0) {
             return;
         }
@@ -1212,9 +1213,7 @@ public class ProxmoxCloud extends Cloud {
                         proxmoxCloud.reconcileMinInstances();
                     } catch (Exception e) {
                         LOGGER.log(
-                                Level.WARNING,
-                                "Minimum-floor reconciliation error for cloud '" + cloud.name + "'",
-                                e);
+                                Level.WARNING, "Minimum-floor reconciliation error for cloud '" + cloud.name + "'", e);
                     }
                 }
             }
@@ -1289,7 +1288,8 @@ public class ProxmoxCloud extends Cloud {
             if (credentials.getTokenId() == null || credentials.getTokenId().isBlank()) {
                 return FormValidation.error("Credential token identifier is required");
             }
-            if (credentials.getTokenSecret() == null || credentials.getTokenSecret().getPlainText().isBlank()) {
+            if (credentials.getTokenSecret() == null
+                    || credentials.getTokenSecret().getPlainText().isBlank()) {
                 return FormValidation.error("Credential token secret is required");
             }
 

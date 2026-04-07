@@ -208,7 +208,6 @@ public class ProxmoxClient {
                 + tokenSecret;
     }
 
-
     /**
      * Get the next available VM ID from Proxmox cluster.
      * Proxmox VM IDs must be positive integers; this avoids conflicts with existing VMs.
@@ -323,7 +322,9 @@ public class ProxmoxClient {
             return;
         } catch (IOException e) {
             firstError = e;
-            LOGGER.log(Level.FINE, "Plain guest-agent file-write failed, retrying with base64 encoding: " + e.getMessage());
+            LOGGER.log(
+                    Level.FINE,
+                    "Plain guest-agent file-write failed, retrying with base64 encoding: " + e.getMessage());
         }
 
         // Fallback for environments that require encoded payloads.
@@ -360,8 +361,7 @@ public class ProxmoxClient {
             if (!response.isSuccessful()) {
                 okhttp3.ResponseBody respBody = response.body();
                 String msg = respBody != null ? respBody.string() : "";
-                throw new IOException(
-                        "HTTP " + response.code() + " " + msg);
+                throw new IOException("HTTP " + response.code() + " " + msg);
             }
         }
     }
@@ -376,7 +376,9 @@ public class ProxmoxClient {
      * @throws Exception if the request fails or the command exits non-zero
      */
     public void execCommandViaGuestAgent(String vmId, String... commandAndArgs) throws Exception {
-        if (commandAndArgs == null || commandAndArgs.length == 0 || commandAndArgs[0] == null
+        if (commandAndArgs == null
+                || commandAndArgs.length == 0
+                || commandAndArgs[0] == null
                 || commandAndArgs[0].isBlank()) {
             throw new IllegalArgumentException("commandAndArgs must include a non-empty command");
         }
@@ -465,13 +467,14 @@ public class ProxmoxClient {
                         continue;
                     }
 
-                    throw new IOException(
-                            "guest-agent exec failed (command='" + cmd + "', attempt=" + attempt + "/" + maxAttempts
-                                    + "): HTTP " + response.code() + " " + responseBody);
+                    throw new IOException("guest-agent exec failed (command='" + cmd + "', attempt=" + attempt + "/"
+                            + maxAttempts + "): HTTP " + response.code() + " " + responseBody);
                 }
 
                 JsonObject json = gson.fromJson(responseBody.isBlank() ? "{}" : responseBody, JsonObject.class);
-                if (json == null || !json.has("data") || !json.getAsJsonObject("data").has("pid")) {
+                if (json == null
+                        || !json.has("data")
+                        || !json.getAsJsonObject("data").has("pid")) {
                     throw new IOException("No pid returned from guest-agent exec");
                 }
                 return json.getAsJsonObject("data").get("pid").getAsInt();
@@ -491,8 +494,8 @@ public class ProxmoxClient {
     }
 
     private boolean isGuestAgentPingSuccessful(String vmId) {
-        String pingPath = String.format(
-                "%s/api2/json/nodes/%s/qemu/%s/agent/ping", serverConfig.getHost(), nodeForVm, vmId);
+        String pingPath =
+                String.format("%s/api2/json/nodes/%s/qemu/%s/agent/ping", serverConfig.getHost(), nodeForVm, vmId);
         Request request = new Request.Builder()
                 .url(pingPath)
                 .post(new FormBody.Builder().build())
@@ -506,7 +509,6 @@ public class ProxmoxClient {
         }
     }
 
-
     private String toLegacyCommandLine(String... commandAndArgs) {
         StringBuilder command = new StringBuilder();
         for (int i = 0; i < commandAndArgs.length; i++) {
@@ -517,7 +519,6 @@ public class ProxmoxClient {
         }
         return command.toString();
     }
-
 
     private String decodeExecDataField(JsonObject data, String fieldName) {
         if (data == null || !data.has(fieldName) || data.get(fieldName).isJsonNull()) {
@@ -942,7 +943,6 @@ public class ProxmoxClient {
         }
         throw new Exception("Timed out waiting for task: " + upid);
     }
-
 
     /**
      * Close the client connection.

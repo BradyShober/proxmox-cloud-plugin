@@ -15,4 +15,3 @@ public interface ProxmoxApiTokenCredentials extends StandardCredentials {
 
     Secret getTokenSecret();
 }
-
