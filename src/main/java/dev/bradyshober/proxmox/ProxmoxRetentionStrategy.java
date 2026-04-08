@@ -26,6 +26,7 @@ import org.kohsuke.stapler.DataBoundSetter;
  */
 public class ProxmoxRetentionStrategy extends RetentionStrategy<SlaveComputer> {
     private static final Logger LOGGER = Logger.getLogger(ProxmoxRetentionStrategy.class.getName());
+    private static final String AGENT_PREFIX = "Agent ";
 
     /** Default idle timeout before the VM is terminated (5 minutes). */
     public static final int DEFAULT_IDLE_MINUTES = 5;
@@ -130,7 +131,7 @@ public class ProxmoxRetentionStrategy extends RetentionStrategy<SlaveComputer> {
             computer.setTemporarilyOffline(true, new OfflineCause.ByCLI(offlineReason));
             LOGGER.log(
                     Level.INFO,
-                    "Agent " + computer.getName() + " exceeded max lifetime of " + effectiveMaxLifetimeMinutes
+                    AGENT_PREFIX + computer.getName() + " exceeded max lifetime of " + effectiveMaxLifetimeMinutes
                             + " min; marked temporarily offline for drain");
         }
 
@@ -156,7 +157,7 @@ public class ProxmoxRetentionStrategy extends RetentionStrategy<SlaveComputer> {
             computer.setTemporarilyOffline(true, new OfflineCause.ByCLI(offlineReason));
             LOGGER.log(
                     Level.INFO,
-                    "Agent " + computer.getName() + " reached max build count of " + effectiveMaxBuilds
+                    AGENT_PREFIX + computer.getName() + " reached max build count of " + effectiveMaxBuilds
                             + "; marked temporarily offline for drain");
         }
 
@@ -200,17 +201,17 @@ public class ProxmoxRetentionStrategy extends RetentionStrategy<SlaveComputer> {
 
             LOGGER.log(
                     Level.INFO,
-                    "Agent " + computer.getName() + " idle for " + idleMinutesElapsed + " min (threshold "
+                    AGENT_PREFIX + computer.getName() + " idle for " + idleMinutesElapsed + " min (threshold "
                             + effectiveIdleMinutes + " min); terminating VM " + configuredVmId);
         } else if (maxBuildsExceeded) {
             LOGGER.log(
                     Level.INFO,
-                    "Agent " + computer.getName() + " reached max build count and is now idle; terminating VM "
+                    AGENT_PREFIX + computer.getName() + " reached max build count and is now idle; terminating VM "
                             + configuredVmId);
         } else {
             LOGGER.log(
                     Level.INFO,
-                    "Agent " + computer.getName() + " reached max lifetime of " + effectiveMaxLifetimeMinutes
+                    AGENT_PREFIX + computer.getName() + " reached max lifetime of " + effectiveMaxLifetimeMinutes
                             + " min and is now idle; terminating VM " + configuredVmId);
         }
 
@@ -277,10 +278,10 @@ public class ProxmoxRetentionStrategy extends RetentionStrategy<SlaveComputer> {
             }
             LOGGER.log(
                     Level.INFO,
-                    "Agent " + computer.getName() + " accepted its final allowed build (max=" + configuredMaxBuilds
+                    AGENT_PREFIX + computer.getName() + " accepted its final allowed build (max=" + configuredMaxBuilds
                             + "); disabled for further scheduling");
         } else {
-            LOGGER.log(Level.FINE, "Agent " + computer.getName() + " has " + remaining + " builds remaining");
+            LOGGER.log(Level.FINE, AGENT_PREFIX + computer.getName() + " has " + remaining + " builds remaining");
         }
     }
 

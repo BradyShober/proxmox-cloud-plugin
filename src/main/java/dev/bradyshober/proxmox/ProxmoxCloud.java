@@ -48,6 +48,8 @@ public class ProxmoxCloud extends Cloud {
     private static final Logger LOGGER = Logger.getLogger(ProxmoxCloud.class.getName());
     private static final String PROVISIONED_BY_PLUGIN_TAG = "jenkins-proxmox-plugin";
     private static final String CLOUD_TAG_PREFIX = "jenkins-cloud-";
+    private static final String SYSTEMCTL_CMD = "systemctl";
+    private static final String DEFAULT_JENKINS_URL = "http://jenkins:8080/";
     private static final ConcurrentMap<String, VmAllocationState> VM_ALLOCATION_STATES = new ConcurrentHashMap<>();
 
     @Serial
@@ -178,38 +180,47 @@ public class ProxmoxCloud extends Cloud {
         String allocationScope = getVmAllocationScopeKey();
 
         synchronized (allocationState) {
-            for (int attempt = 1; attempt <= 25; attempt++) {
-                String vmId = nextVmIdSupplier.call();
+            String vmId = nextVmIdSupplier.call();
+            if (vmId == null || vmId.isBlank()) {
+                throw new IOException("Proxmox returned a blank VM ID for cloud '" + name + "'");
+            }
+
+            // Wait in a while loop so the condition is re-checked after every wake,
+            // guarding against spurious wakeups (fixes java:S2274).
+            // Each iteration fetches a fresh VM ID — Proxmox may offer a different one.
+            int attempt = 0;
+            while (allocationState.reservedVmIds.contains(vmId) && attempt < 25) {
+                attempt++;
+                LOGGER.log(
+                        Level.FINE,
+                        "VM ID {0} is already reserved for Proxmox allocation scope {1}; waiting to retry (attempt {2})",
+                        new Object[] {vmId, allocationScope, attempt});
+                allocationState.wait(200L);
+                vmId = nextVmIdSupplier.call();
                 if (vmId == null || vmId.isBlank()) {
                     throw new IOException("Proxmox returned a blank VM ID for cloud '" + name + "'");
                 }
+            }
 
-                if (allocationState.reservedVmIds.contains(vmId)) {
-                    LOGGER.log(
-                            Level.FINE,
-                            "VM ID {0} is already reserved for Proxmox allocation scope {1}; waiting to retry (attempt {2})",
-                            new Object[] {vmId, allocationScope, attempt});
-                    allocationState.wait(200L);
-                    continue;
-                }
+            if (allocationState.reservedVmIds.contains(vmId)) {
+                throw new IOException(
+                        "Timed out waiting for a unique Proxmox VM ID for allocation scope '" + allocationScope + "'");
+            }
 
-                allocationState.reservedVmIds.add(vmId);
-                try {
-                    LOGGER.log(Level.FINE, "Allocated VM ID from Proxmox for {0}: {1}", new Object[] {agentName, vmId});
-                    String upidClone = cloneStarter.startClone(vmId);
-                    LOGGER.log(Level.FINE, "Clone task started for VM {0}: {1}", new Object[] {vmId, upidClone});
-                    return new CloneReservation(vmId, upidClone);
-                } catch (Exception e) {
-                    allocationState.reservedVmIds.remove(vmId);
-                    allocationState.notifyAll();
-                    throw e;
-                }
+            allocationState.reservedVmIds.add(vmId);
+            try {
+                LOGGER.log(Level.FINE, "Allocated VM ID from Proxmox for {0}: {1}", new Object[] {agentName, vmId});
+                String upidClone = cloneStarter.startClone(vmId);
+                LOGGER.log(Level.FINE, "Clone task started for VM {0}: {1}", new Object[] {vmId, upidClone});
+                return new CloneReservation(vmId, upidClone);
+            } catch (Exception e) {
+                allocationState.reservedVmIds.remove(vmId);
+                allocationState.notifyAll();
+                throw e;
             }
         }
-
-        throw new IOException(
-                "Timed out waiting for a unique Proxmox VM ID for allocation scope '" + allocationScope + "'");
     }
+
 
     private CloneReservation reserveVmIdAndStartClone(String agentName) throws Exception {
         String templateVmId = agentTemplate.getTemplateVmId();
@@ -468,9 +479,9 @@ public class ProxmoxCloud extends Cloud {
                 // Validate unit syntax early so provisioning logs include the parse error.
                 proxmoxClient.execCommandViaGuestAgent(
                         vmId, "systemd-analyze", "verify", "/etc/systemd/system/jenkins-agent.service");
-                proxmoxClient.execCommandViaGuestAgent(vmId, "systemctl", "daemon-reload");
-                proxmoxClient.execCommandViaGuestAgent(vmId, "systemctl", "enable", "--now", "jenkins-agent.service");
-                proxmoxClient.execCommandViaGuestAgent(vmId, "systemctl", "is-active", "jenkins-agent.service");
+                proxmoxClient.execCommandViaGuestAgent(vmId, SYSTEMCTL_CMD, "daemon-reload");
+                proxmoxClient.execCommandViaGuestAgent(vmId, SYSTEMCTL_CMD, "enable", "--now", "jenkins-agent.service");
+                proxmoxClient.execCommandViaGuestAgent(vmId, SYSTEMCTL_CMD, "is-active", "jenkins-agent.service");
                 LOGGER.log(
                         Level.INFO, "Started jenkins-agent.service on VM " + vmId + "; waiting for inbound connection");
                 return preRegisteredNode;
@@ -736,9 +747,9 @@ public class ProxmoxCloud extends Cloud {
      */
     private String generateCloudInitScript(String agentName) {
         Jenkins jenkins = Jenkins.getInstanceOrNull();
-        String jenkinsUrl = jenkins != null ? jenkins.getRootUrl() : "http://jenkins:8080/";
+        String jenkinsUrl = jenkins != null ? jenkins.getRootUrl() : DEFAULT_JENKINS_URL;
         if (jenkinsUrl == null || jenkinsUrl.isBlank()) {
-            jenkinsUrl = "http://jenkins:8080/";
+            jenkinsUrl = DEFAULT_JENKINS_URL;
         }
         if (!jenkinsUrl.endsWith("/")) {
             jenkinsUrl += "/";

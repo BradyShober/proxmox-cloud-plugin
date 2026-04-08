@@ -34,6 +34,10 @@ import okhttp3.Response;
 public class ProxmoxClient {
     private static final Logger LOGGER = Logger.getLogger(ProxmoxClient.class.getName());
     private static final Gson gson = new Gson();
+    private static final String AUTHORIZATION_HEADER = "Authorization";
+    private static final String STATUS_FIELD = "status";
+    private static final String EXITSTATUS_FIELD = "exitstatus";
+    private static final String ENDTIME_FIELD = "endtime";
 
     private final ProxmoxServerConfig serverConfig;
     private final OkHttpClient httpClient;
@@ -85,10 +89,14 @@ public class ProxmoxClient {
                 // Create a trust manager that accepts all certificates
                 X509TrustManager trustAllCerts = new X509TrustManager() {
                     @Override
-                    public void checkClientTrusted(X509Certificate[] chain, String authType) {}
+                    public void checkClientTrusted(X509Certificate[] chain, String authType) {
+                        // Accept all client certificates (not used in OkHttp)
+                    }
 
                     @Override
-                    public void checkServerTrusted(X509Certificate[] chain, String authType) {}
+                    public void checkServerTrusted(X509Certificate[] chain, String authType) {
+                        // Accept all server certificates
+                    }
 
                     @Override
                     public X509Certificate[] getAcceptedIssuers() {
@@ -155,7 +163,7 @@ public class ProxmoxClient {
         Request request = new Request.Builder()
                 .url(versionUrl)
                 .get()
-                .addHeader("Authorization", authToken)
+                .addHeader(AUTHORIZATION_HEADER, authToken)
                 .build();
 
         try (Response response = httpClient.newCall(request).execute()) {
@@ -220,7 +228,7 @@ public class ProxmoxClient {
         Request request = new Request.Builder()
                 .url(path)
                 .get()
-                .addHeader("Authorization", authToken)
+                .addHeader(AUTHORIZATION_HEADER, authToken)
                 .build();
 
         try (Response response = httpClient.newCall(request).execute()) {
@@ -285,7 +293,7 @@ public class ProxmoxClient {
             Request request = new Request.Builder()
                     .url(path)
                     .post(new FormBody.Builder().build())
-                    .addHeader("Authorization", authToken)
+                    .addHeader(AUTHORIZATION_HEADER, authToken)
                     .build();
             try (Response response = httpClient.newCall(request).execute()) {
                 if (response.isSuccessful()) {
@@ -354,7 +362,7 @@ public class ProxmoxClient {
         Request request = new Request.Builder()
                 .url(path)
                 .post(form.build())
-                .addHeader("Authorization", authToken)
+                .addHeader(AUTHORIZATION_HEADER, authToken)
                 .build();
 
         try (Response response = httpClient.newCall(request).execute()) {
@@ -396,7 +404,7 @@ public class ProxmoxClient {
             Request statusReq = new Request.Builder()
                     .url(statusPath)
                     .get()
-                    .addHeader("Authorization", authToken)
+                    .addHeader(AUTHORIZATION_HEADER, authToken)
                     .build();
             try (Response response = httpClient.newCall(statusReq).execute()) {
                 if (response.isSuccessful()) {
@@ -449,7 +457,7 @@ public class ProxmoxClient {
             Request request = new Request.Builder()
                     .url(path)
                     .post(body)
-                    .addHeader("Authorization", authToken)
+                    .addHeader(AUTHORIZATION_HEADER, authToken)
                     .build();
 
             try (Response response = httpClient.newCall(request).execute()) {
@@ -499,7 +507,7 @@ public class ProxmoxClient {
         Request request = new Request.Builder()
                 .url(pingPath)
                 .post(new FormBody.Builder().build())
-                .addHeader("Authorization", authToken)
+                .addHeader(AUTHORIZATION_HEADER, authToken)
                 .build();
         try (Response response = httpClient.newCall(request).execute()) {
             return response.isSuccessful();
@@ -576,7 +584,7 @@ public class ProxmoxClient {
         Request request = new Request.Builder()
                 .url(path)
                 .delete()
-                .addHeader("Authorization", authToken)
+                .addHeader(AUTHORIZATION_HEADER, authToken)
                 .build();
 
         try (Response response = httpClient.newCall(request).execute()) {
@@ -605,7 +613,7 @@ public class ProxmoxClient {
         Request request = new Request.Builder()
                 .url(path)
                 .get()
-                .addHeader("Authorization", authToken)
+                .addHeader(AUTHORIZATION_HEADER, authToken)
                 .build();
 
         try (Response response = httpClient.newCall(request).execute()) {
@@ -638,8 +646,8 @@ public class ProxmoxClient {
                 String name = vm.has("name") && !vm.get("name").isJsonNull()
                         ? vm.get("name").getAsString()
                         : null;
-                String status = vm.has("status") && !vm.get("status").isJsonNull()
-                        ? vm.get("status").getAsString()
+                String status = vm.has(STATUS_FIELD) && !vm.get(STATUS_FIELD).isJsonNull()
+                        ? vm.get(STATUS_FIELD).getAsString()
                         : null;
                 String tags = vm.has("tags") && !vm.get("tags").isJsonNull()
                         ? vm.get("tags").getAsString()
@@ -671,7 +679,7 @@ public class ProxmoxClient {
         Request request = new Request.Builder()
                 .url(path)
                 .get()
-                .addHeader("Authorization", authToken)
+                .addHeader(AUTHORIZATION_HEADER, authToken)
                 .build();
 
         try (Response response = httpClient.newCall(request).execute()) {
@@ -690,15 +698,15 @@ public class ProxmoxClient {
 
             if (jsonResponse != null && jsonResponse.has("data")) {
                 JsonObject data = jsonResponse.getAsJsonObject("data");
-                String status = data.has("status") && !data.get("status").isJsonNull()
-                        ? data.get("status").getAsString()
+                String status = data.has(STATUS_FIELD) && !data.get(STATUS_FIELD).isJsonNull()
+                        ? data.get(STATUS_FIELD).getAsString()
                         : "unknown";
                 String exitStatus =
-                        data.has("exitstatus") && !data.get("exitstatus").isJsonNull()
-                                ? data.get("exitstatus").getAsString()
+                        data.has(EXITSTATUS_FIELD) && !data.get(EXITSTATUS_FIELD).isJsonNull()
+                                ? data.get(EXITSTATUS_FIELD).getAsString()
                                 : "null";
-                String endTime = data.has("endtime") && !data.get("endtime").isJsonNull()
-                        ? data.get("endtime").getAsString()
+                String endTime = data.has(ENDTIME_FIELD) && !data.get(ENDTIME_FIELD).isJsonNull()
+                        ? data.get(ENDTIME_FIELD).getAsString()
                         : "null";
                 LOGGER.log(Level.FINE, "Task status for {0}: status={1}, exitstatus={2}, endtime={3}", new Object[] {
                     upid, status, exitStatus, endTime
@@ -723,15 +731,15 @@ public class ProxmoxClient {
             return false;
         }
 
-        if (data.has("endtime") && !data.get("endtime").isJsonNull()) {
+        if (data.has(ENDTIME_FIELD) && !data.get(ENDTIME_FIELD).isJsonNull()) {
             return true;
         }
 
-        String status = data.has("status") && !data.get("status").isJsonNull()
-                ? data.get("status").getAsString()
+        String status = data.has(STATUS_FIELD) && !data.get(STATUS_FIELD).isJsonNull()
+                ? data.get(STATUS_FIELD).getAsString()
                 : null;
-        String exitStatus = data.has("exitstatus") && !data.get("exitstatus").isJsonNull()
-                ? data.get("exitstatus").getAsString()
+        String exitStatus = data.has(EXITSTATUS_FIELD) && !data.get(EXITSTATUS_FIELD).isJsonNull()
+                ? data.get(EXITSTATUS_FIELD).getAsString()
                 : null;
 
         return "stopped".equalsIgnoreCase(status) && "OK".equalsIgnoreCase(exitStatus);
@@ -744,7 +752,7 @@ public class ProxmoxClient {
         Request request = new Request.Builder()
                 .url(path)
                 .post(body)
-                .addHeader("Authorization", authToken)
+                .addHeader(AUTHORIZATION_HEADER, authToken)
                 .build();
 
         LOGGER.log(Level.FINE, "POST request to: " + path);
@@ -797,7 +805,7 @@ public class ProxmoxClient {
             Request request = new Request.Builder()
                     .url(path)
                     .get()
-                    .addHeader("Authorization", authToken)
+                    .addHeader(AUTHORIZATION_HEADER, authToken)
                     .build();
 
             try (Response response = httpClient.newCall(request).execute()) {
@@ -909,7 +917,7 @@ public class ProxmoxClient {
         Request request = new Request.Builder()
                 .url(path)
                 .put(body)
-                .addHeader("Authorization", authToken)
+                .addHeader(AUTHORIZATION_HEADER, authToken)
                 .build();
 
         try (Response response = httpClient.newCall(request).execute()) {
