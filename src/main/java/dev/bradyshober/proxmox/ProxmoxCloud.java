@@ -143,6 +143,7 @@ public class ProxmoxCloud extends Cloud {
 
     @Serial
     private Object readResolve() {
+        super.readResolve();
         proxmoxClient = null;
         startupReconciled = false;
         initTransientState();
