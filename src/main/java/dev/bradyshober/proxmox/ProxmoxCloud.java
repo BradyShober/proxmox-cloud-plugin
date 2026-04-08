@@ -905,9 +905,9 @@ public class ProxmoxCloud extends Cloud {
 
     private String buildJenkinsAgentServiceContent(String agentName, String jnlpSecret) {
         Jenkins jenkins = Jenkins.getInstanceOrNull();
-        String jenkinsUrl = jenkins != null ? jenkins.getRootUrl() : "http://jenkins:8080/";
+        String jenkinsUrl = jenkins != null ? jenkins.getRootUrl() : DEFAULT_JENKINS_URL;
         if (jenkinsUrl == null || jenkinsUrl.isBlank()) {
-            jenkinsUrl = "http://jenkins:8080/";
+            jenkinsUrl = DEFAULT_JENKINS_URL;
         }
         if (!jenkinsUrl.endsWith("/")) {
             jenkinsUrl += "/";
