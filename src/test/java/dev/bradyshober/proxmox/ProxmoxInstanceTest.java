@@ -95,4 +95,3 @@ class ProxmoxInstanceTest {
         assertEquals("Failed", ProxmoxInstance.InstanceState.FAILED.getDisplayName());
     }
 }
-

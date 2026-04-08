@@ -139,4 +139,3 @@ class ProxmoxRetentionStrategyTest {
         assertTrue(ProxmoxRetentionStrategy.MAX_BUILDS_DRAIN_REASON_PREFIX.contains("build"));
     }
 }
-

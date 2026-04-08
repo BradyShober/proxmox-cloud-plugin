@@ -221,7 +221,6 @@ public class ProxmoxCloud extends Cloud {
         }
     }
 
-
     private CloneReservation reserveVmIdAndStartClone(String agentName) throws Exception {
         String templateVmId = agentTemplate.getTemplateVmId();
         return reserveVmIdAndStartClone(

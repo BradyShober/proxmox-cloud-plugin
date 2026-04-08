@@ -4,7 +4,6 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import hudson.model.Slave;
 import hudson.slaves.DumbSlave;
-import hudson.slaves.RetentionStrategy;
 import org.junit.jupiter.api.Test;
 import org.jvnet.hudson.test.JenkinsRule;
 import org.jvnet.hudson.test.junit.jupiter.WithJenkins;
@@ -37,10 +36,7 @@ class ProxmoxSlaveTest {
         ProxmoxRetentionStrategy strategy = new ProxmoxRetentionStrategy("mycloud", "100", 5, 0, 0);
         DumbSlave slave = j.createSlave("test-node-2", null, null);
         // Swap in the ProxmoxRetentionStrategy
-        slave = new DumbSlave(
-                "test-node-max0",
-                slave.getRemoteFS(),
-                slave.getLauncher());
+        slave = new DumbSlave("test-node-max0", slave.getRemoteFS(), slave.getLauncher());
         ((Slave) slave).setRetentionStrategy(strategy);
 
         String displayName = ProxmoxSlave.getDisplayName(slave);
@@ -57,10 +53,7 @@ class ProxmoxSlaveTest {
         ProxmoxRetentionStrategy strategy = new ProxmoxRetentionStrategy("mycloud", "100", 5, 0, maxBuilds);
 
         // Create a DumbSlave that is NOT registered with Jenkins (so toComputer() returns null)
-        DumbSlave slave = new DumbSlave(
-                "unregistered-node",
-                "/tmp/slave",
-                j.createComputerLauncher(null));
+        DumbSlave slave = new DumbSlave("unregistered-node", "/tmp/slave", j.createComputerLauncher(null));
         ((Slave) slave).setRetentionStrategy(strategy);
 
         String displayName = ProxmoxSlave.getDisplayName(slave);
@@ -85,8 +78,7 @@ class ProxmoxSlaveTest {
         // No builds have run, so remaining = max - 0 - 0 = maxBuilds
         String displayName = ProxmoxSlave.getDisplayName(slave);
         assertTrue(
-                displayName.startsWith("registered-node"),
-                "Display name should start with node name: " + displayName);
+                displayName.startsWith("registered-node"), "Display name should start with node name: " + displayName);
         assertTrue(
                 displayName.contains("builds remaining"),
                 "Display name should contain 'builds remaining': " + displayName);
@@ -103,10 +95,7 @@ class ProxmoxSlaveTest {
         int maxBuilds = 1;
         ProxmoxRetentionStrategy strategy = new ProxmoxRetentionStrategy("mycloud", "102", 5, 0, maxBuilds);
 
-        DumbSlave slave = new DumbSlave(
-                "clamp-test-node",
-                "/tmp/slave",
-                j.createComputerLauncher(null));
+        DumbSlave slave = new DumbSlave("clamp-test-node", "/tmp/slave", j.createComputerLauncher(null));
         ((Slave) slave).setRetentionStrategy(strategy);
 
         // No computer — remaining = maxBuilds
@@ -114,4 +103,3 @@ class ProxmoxSlaveTest {
         assertEquals("clamp-test-node (1 builds remaining)", displayName);
     }
 }
-

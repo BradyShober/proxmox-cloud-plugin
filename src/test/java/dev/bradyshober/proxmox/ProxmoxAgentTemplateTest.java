@@ -153,4 +153,3 @@ class ProxmoxAgentTemplateTest {
         assertSame(newLauncher, template.getLauncher());
     }
 }
-

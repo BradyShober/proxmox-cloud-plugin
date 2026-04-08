@@ -66,4 +66,3 @@ class ProxmoxServerConfigTest {
         assertNull(config.getNode());
     }
 }
-

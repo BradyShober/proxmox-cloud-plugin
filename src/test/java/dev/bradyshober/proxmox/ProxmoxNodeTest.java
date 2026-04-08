@@ -179,6 +179,3 @@ class ProxmoxNodeTest {
         assertEquals(1, node.getNumExecutors());
     }
 }
-
-
-

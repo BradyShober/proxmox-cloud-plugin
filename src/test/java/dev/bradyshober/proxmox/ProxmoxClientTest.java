@@ -50,9 +50,8 @@ class ProxmoxClientTest {
                 "pam",
                 "mytoken",
                 Secret.fromString("my-secret-value"));
-        Objects.requireNonNull(CredentialsProvider.lookupStores(j.jenkins)
-                        .iterator()
-                        .next())
+        Objects.requireNonNull(
+                        CredentialsProvider.lookupStores(j.jenkins).iterator().next())
                 .addCredentials(Domain.global(), cred);
     }
 
@@ -93,7 +92,8 @@ class ProxmoxClientTest {
 
         IOException ex = assertThrows(IOException.class, () -> new ProxmoxClient(serverConfig(false)));
         assertTrue(
-                ex.getMessage().contains("authentication failed") || ex.getMessage().contains("401"),
+                ex.getMessage().contains("authentication failed")
+                        || ex.getMessage().contains("401"),
                 "Exception message should mention auth failure: " + ex.getMessage());
     }
 
@@ -112,9 +112,7 @@ class ProxmoxClientTest {
     void testGetNextVmId(JenkinsRule j) throws Exception {
         addCredential(j);
         enqueueVersionOk(); // for constructor
-        mockWebServer.enqueue(new MockResponse()
-                .setResponseCode(200)
-                .setBody("{\"data\":\"300\"}"));
+        mockWebServer.enqueue(new MockResponse().setResponseCode(200).setBody("{\"data\":\"300\"}"));
 
         ProxmoxClient client = new ProxmoxClient(serverConfig(false));
         String vmId = client.getNextVmId();
@@ -193,4 +191,3 @@ class ProxmoxClientTest {
         assertTrue(vms.isEmpty());
     }
 }
-

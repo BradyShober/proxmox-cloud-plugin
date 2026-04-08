@@ -698,16 +698,18 @@ public class ProxmoxClient {
 
             if (jsonResponse != null && jsonResponse.has("data")) {
                 JsonObject data = jsonResponse.getAsJsonObject("data");
-                String status = data.has(STATUS_FIELD) && !data.get(STATUS_FIELD).isJsonNull()
-                        ? data.get(STATUS_FIELD).getAsString()
-                        : "unknown";
-                String exitStatus =
-                        data.has(EXITSTATUS_FIELD) && !data.get(EXITSTATUS_FIELD).isJsonNull()
-                                ? data.get(EXITSTATUS_FIELD).getAsString()
-                                : "null";
-                String endTime = data.has(ENDTIME_FIELD) && !data.get(ENDTIME_FIELD).isJsonNull()
-                        ? data.get(ENDTIME_FIELD).getAsString()
+                String status =
+                        data.has(STATUS_FIELD) && !data.get(STATUS_FIELD).isJsonNull()
+                                ? data.get(STATUS_FIELD).getAsString()
+                                : "unknown";
+                String exitStatus = data.has(EXITSTATUS_FIELD)
+                                && !data.get(EXITSTATUS_FIELD).isJsonNull()
+                        ? data.get(EXITSTATUS_FIELD).getAsString()
                         : "null";
+                String endTime =
+                        data.has(ENDTIME_FIELD) && !data.get(ENDTIME_FIELD).isJsonNull()
+                                ? data.get(ENDTIME_FIELD).getAsString()
+                                : "null";
                 LOGGER.log(Level.FINE, "Task status for {0}: status={1}, exitstatus={2}, endtime={3}", new Object[] {
                     upid, status, exitStatus, endTime
                 });
@@ -738,9 +740,10 @@ public class ProxmoxClient {
         String status = data.has(STATUS_FIELD) && !data.get(STATUS_FIELD).isJsonNull()
                 ? data.get(STATUS_FIELD).getAsString()
                 : null;
-        String exitStatus = data.has(EXITSTATUS_FIELD) && !data.get(EXITSTATUS_FIELD).isJsonNull()
-                ? data.get(EXITSTATUS_FIELD).getAsString()
-                : null;
+        String exitStatus =
+                data.has(EXITSTATUS_FIELD) && !data.get(EXITSTATUS_FIELD).isJsonNull()
+                        ? data.get(EXITSTATUS_FIELD).getAsString()
+                        : null;
 
         return "stopped".equalsIgnoreCase(status) && "OK".equalsIgnoreCase(exitStatus);
     }
