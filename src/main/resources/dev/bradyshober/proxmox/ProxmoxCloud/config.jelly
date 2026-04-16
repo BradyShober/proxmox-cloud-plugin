@@ -74,7 +74,7 @@
         <f:textbox default="proxmox" placeholder="proxmox linux docker"/>
     </f:entry>
 
-    <st:include page="launcher-behavior.jelly"/>
+    <st:include page="launcher-behavior.jelly" class="dev.bradyshober.proxmox.ProxmoxCloud"/>
 
 </j:jelly>
 
