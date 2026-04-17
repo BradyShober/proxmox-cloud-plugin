@@ -11,11 +11,11 @@ import hudson.model.Descriptor;
 import hudson.model.Label;
 import hudson.model.Node;
 import hudson.model.TaskListener;
-import hudson.plugins.sshslaves.SSHLauncher;
+import hudson.plugins.sshslaves.SSHConnector;
 import hudson.security.ACL;
 import hudson.slaves.Cloud;
+import hudson.slaves.ComputerConnector;
 import hudson.slaves.ComputerLauncher;
-import hudson.slaves.JNLPLauncher;
 import hudson.slaves.NodeProvisioner;
 import hudson.util.FormValidation;
 import hudson.util.ListBoxModel;
@@ -103,7 +103,7 @@ public class ProxmoxCloud extends Cloud {
             int minInstances,
             int maxInstances,
             int idleMinutesBeforeTermination,
-            ComputerLauncher launcher,
+            ComputerConnector computerConnector,
             String sshUsername,
             String sshPublicKey,
             String labels,
@@ -113,14 +113,14 @@ public class ProxmoxCloud extends Cloud {
         this.serverConfig = new ProxmoxServerConfig(
                 host, apiTokenCredentialId, !skipTlsVerification, node == null || node.isBlank() ? "pve" : node);
 
-        ComputerLauncher configuredLauncher = launcher != null ? launcher : defaultLauncher();
+        ComputerConnector configuredConnector = computerConnector != null ? computerConnector : defaultConnector();
 
         this.agentTemplate = new ProxmoxAgentTemplate(
                 templateVmId,
                 agentNameTemplate == null || agentNameTemplate.isBlank() ? "proxmox-agent" : agentNameTemplate,
                 Math.max(0, minInstances),
                 maxInstances > 0 ? maxInstances : 1,
-                configuredLauncher,
+                configuredConnector,
                 sshUsername == null || sshUsername.isBlank() ? "jenkins" : sshUsername,
                 sshPublicKey,
                 labels == null || labels.isBlank() ? "proxmox" : labels,
@@ -133,10 +133,10 @@ public class ProxmoxCloud extends Cloud {
         initTransientState();
     }
 
-    private static ComputerLauncher defaultLauncher() {
-        JNLPLauncher launcher = new JNLPLauncher();
-        launcher.setWebSocket(true);
-        return launcher;
+    private static ComputerConnector defaultConnector() {
+        ProxmoxJNLPConnector connector = new ProxmoxJNLPConnector();
+        connector.setWebSocket(true);
+        return connector;
     }
 
     private void initTransientState() {
@@ -385,20 +385,19 @@ public class ProxmoxCloud extends Cloud {
      * MAC secret can be computed, then — after the VM boots — the secret is written as a systemd
      * service file via the QEMU guest agent. The VM then connects back to Jenkins automatically.
      *
-     * <p>For <b>SSH outbound</b> mode the VM is started first, its IP is resolved via the QEMU
-     * guest agent, then the node is created and launched.
+     * <p>For <b>SSH/other outbound</b> mode the VM is started first, its IP is resolved via the QEMU
+     * guest agent, then the node is created with a launcher obtained from the configured connector.
      */
     private Node provisionAgent(String agentName, String cloudInitScript) throws Exception {
         LOGGER.log(Level.INFO, "Starting provisioning of agent: " + agentName);
 
-        ComputerLauncher configuredLauncher = agentTemplate.getLauncher();
-        boolean inboundLauncher = isInboundLauncher(configuredLauncher);
-        boolean sshLauncher = configuredLauncher instanceof SSHLauncher;
+        ComputerConnector configuredConnector = agentTemplate.getComputerConnector();
+        boolean inboundConnector = isInboundConnector(configuredConnector);
 
         // Compute the JNLP secret up front – it only depends on agentName, not vmId.
         // The secret is injected post-boot via the QEMU guest agent (not cloud-init).
         String jnlpSecret = null;
-        if (inboundLauncher) {
+        if (inboundConnector) {
             jnlpSecret = JnlpSlaveAgentProtocol.SLAVE_SECRET.mac(agentName);
             LOGGER.log(Level.FINE, "Computed inbound agent secret for " + agentName);
         }
@@ -420,7 +419,7 @@ public class ProxmoxCloud extends Cloud {
             // Pre-register the Jenkins node now that the real vmId is known.
             // This must happen before the VM boots so Jenkins can accept the inbound connection.
             ProxmoxNode preRegisteredNode = null;
-            if (inboundLauncher) {
+            if (inboundConnector) {
                 preRegisteredNode = buildDumbSlave(agentName, vmId, null);
                 Jenkins.get().addNode(preRegisteredNode);
                 LOGGER.log(Level.INFO, "Pre-registered Jenkins node for inbound agent: " + agentName);
@@ -464,7 +463,7 @@ public class ProxmoxCloud extends Cloud {
             // secret via QEMU guest agent, then start the service.
             // Requires qemu-guest-agent and Java to be pre-installed in the template.
             // -----------------------------------------------------------------------
-            if (inboundLauncher && jnlpSecret != null) {
+            if (inboundConnector && jnlpSecret != null) {
                 String serviceContent = buildJenkinsAgentServiceContent(agentName, jnlpSecret);
                 LOGGER.log(Level.FINE, "Waiting for QEMU guest agent on VM " + vmId);
                 proxmoxClient.waitForGuestAgent(vmId);
@@ -487,25 +486,23 @@ public class ProxmoxCloud extends Cloud {
             }
 
             // -----------------------------------------------------------------------
-            // SSH mode: resolve IP via QEMU guest agent, then create + return the node.
+            // SSH/other outbound mode: resolve IP via QEMU guest agent, then create the
+            // launcher using the connector, and return the node.
             // -----------------------------------------------------------------------
-            if (sshLauncher) {
-                LOGGER.log(Level.FINE, "Resolving IP address for VM " + vmId + " via QEMU guest agent");
-                try {
-                    String ipAddress = proxmoxClient.getVmIpAddress(vmId);
-                    instance.setIpAddress(ipAddress);
-                    LOGGER.log(Level.INFO, "Resolved VM " + vmId + " IP address: " + ipAddress);
-                } catch (Exception e) {
-                    LOGGER.log(
-                            Level.WARNING,
-                            "Could not resolve VM IP address via guest agent; "
-                                    + "the SSH launcher may not be able to connect. Error: " + e.getMessage());
-                }
-                return buildDumbSlave(agentName, vmId, instance.getIpAddress());
+            LOGGER.log(Level.FINE, "Resolving IP address for VM " + vmId + " via QEMU guest agent");
+            String ipAddress = null;
+            try {
+                ipAddress = proxmoxClient.getVmIpAddress(vmId);
+                instance.setIpAddress(ipAddress);
+                LOGGER.log(Level.INFO, "Resolved VM " + vmId + " IP address: " + ipAddress);
+            } catch (Exception e) {
+                LOGGER.log(
+                        Level.WARNING,
+                        "Could not resolve VM IP address via guest agent; "
+                                + "the connector may not be able to connect. Error: " + e.getMessage());
             }
 
-            // Fallback – should not normally be reached
-            return buildDumbSlave(agentName, vmId, null);
+            return buildDumbSlave(agentName, vmId, ipAddress);
         } catch (Exception e) {
             if (vmIdReserved) {
                 releaseReservedVmId(vmId);
@@ -573,43 +570,25 @@ public class ProxmoxCloud extends Cloud {
                 agentTemplate.getMaxBuildsPerAgent());
     }
 
-    private ComputerLauncher buildNodeLauncher(String ipAddress) throws IOException {
-        ComputerLauncher launcherTemplate = agentTemplate.getLauncher();
-        if (launcherTemplate instanceof SSHLauncher sshTemplate) {
-            if (ipAddress == null || ipAddress.isBlank()) {
-                throw new IOException("SSH launcher requires a resolved VM IP address");
+    private ComputerLauncher buildNodeLauncher(String ipAddress) throws IOException, InterruptedException {
+        ComputerConnector connector = agentTemplate.getComputerConnector();
+        if (connector == null) {
+            throw new IOException("No connector configured for launching agents");
+        }
+        if (ipAddress == null || ipAddress.isBlank()) {
+            // For inbound (JNLP) connectors, null IP is acceptable
+            if (isInboundConnector(connector)) {
+                return connector.launch(null, TaskListener.NULL);
             }
-
-            SSHLauncher nodeSshLauncher = new SSHLauncher(
-                    ipAddress,
-                    sshTemplate.getPort(),
-                    sshTemplate.getCredentialsId(),
-                    sshTemplate.getJvmOptions(),
-                    sshTemplate.getJavaPath(),
-                    sshTemplate.getPrefixStartSlaveCmd(),
-                    sshTemplate.getSuffixStartSlaveCmd(),
-                    sshTemplate.getLaunchTimeoutSeconds(),
-                    sshTemplate.getMaxNumRetries(),
-                    sshTemplate.getRetryWaitTime(),
-                    sshTemplate.getSshHostKeyVerificationStrategy());
-            nodeSshLauncher.setTcpNoDelay(sshTemplate.getTcpNoDelay());
-            nodeSshLauncher.setWorkDir(sshTemplate.getWorkDir());
-            return nodeSshLauncher;
+            // Outbound connectors require an address
+            throw new IOException("Outbound connector requires a resolved VM IP address");
         }
-
-        if (launcherTemplate instanceof JNLPLauncher jnlpTemplate) {
-            JNLPLauncher nodeJnlpLauncher = new JNLPLauncher();
-            nodeJnlpLauncher.setWebSocket(jnlpTemplate.isWebSocket());
-            nodeJnlpLauncher.setTunnel(jnlpTemplate.getTunnel());
-            nodeJnlpLauncher.setWorkDirSettings(jnlpTemplate.getWorkDirSettings());
-            return nodeJnlpLauncher;
-        }
-
-        return launcherTemplate;
+        // For outbound connectors (SSH, etc.), use the resolved IP
+        return connector.launch(ipAddress, TaskListener.NULL);
     }
 
-    private boolean isInboundLauncher(ComputerLauncher launcher) {
-        return launcher instanceof JNLPLauncher;
+    private boolean isInboundConnector(ComputerConnector connector) {
+        return connector instanceof ProxmoxJNLPConnector;
     }
 
     String buildProvisioningTags() {
@@ -707,13 +686,13 @@ public class ProxmoxCloud extends Cloud {
             }
 
             String ipAddress = null;
-            if (agentTemplate.getLauncher() instanceof SSHLauncher) {
+            if (!isInboundConnector(agentTemplate.getComputerConnector())) {
                 try {
                     ipAddress = proxmoxClient.getVmIpAddress(vmId);
                 } catch (Exception e) {
                     LOGGER.log(
                             Level.WARNING,
-                            "Skipping SSH node re-attachment for VM " + vmId
+                            "Skipping node re-attachment for VM " + vmId
                                     + " because IP could not be resolved via guest agent",
                             e);
                     continue;
@@ -905,9 +884,9 @@ public class ProxmoxCloud extends Cloud {
 
     private String buildJenkinsAgentServiceContent(String agentName, String jnlpSecret) {
         Jenkins jenkins = Jenkins.getInstanceOrNull();
-        String jenkinsUrl = jenkins != null ? jenkins.getRootUrl() : DEFAULT_JENKINS_URL;
+        String jenkinsUrl = jenkins != null ? jenkins.getRootUrl() : "http://jenkins:8080/";
         if (jenkinsUrl == null || jenkinsUrl.isBlank()) {
-            jenkinsUrl = DEFAULT_JENKINS_URL;
+            jenkinsUrl = "http://jenkins:8080/";
         }
         if (!jenkinsUrl.endsWith("/")) {
             jenkinsUrl += "/";
@@ -990,7 +969,7 @@ public class ProxmoxCloud extends Cloud {
             return;
         }
 
-        boolean inbound = isInboundLauncher(agentTemplate.getLauncher());
+        boolean inbound = isInboundConnector(agentTemplate.getComputerConnector());
         for (int i = 0; i < deficit; i++) {
             String agentName = generateAgentName();
             String cloudInitScript = generateCloudInitScript(agentName);
@@ -999,7 +978,7 @@ public class ProxmoxCloud extends Cloud {
                 try {
                     Node node = provisionAgent(agentName, cloudInitScript);
                     // Inbound (JNLP/WebSocket) agents are pre-registered inside provisionAgent();
-                    // SSH agents are returned and must be added here.
+                    // Outbound agents are returned and must be added here.
                     if (node != null && !inbound) {
                         Jenkins.get().addNode(node);
                     }
@@ -1099,8 +1078,8 @@ public class ProxmoxCloud extends Cloud {
         return agentTemplate.getMinInstances();
     }
 
-    public ComputerLauncher getLauncher() {
-        return agentTemplate.getLauncher();
+    public ComputerConnector getComputerConnector() {
+        return agentTemplate.getComputerConnector();
     }
 
     public String getSshUsername() {
@@ -1260,6 +1239,17 @@ public class ProxmoxCloud extends Cloud {
 
     @Extension
     public static class DescriptorImpl extends Descriptor<Cloud> {
+        public List<Descriptor<ComputerConnector>> getComputerConnectorDescriptors() {
+            List<Descriptor<ComputerConnector>> all = Jenkins.get().getDescriptorList(ComputerConnector.class);
+            List<Descriptor<ComputerConnector>> filtered = new ArrayList<>();
+            for (Descriptor<ComputerConnector> descriptor : all) {
+                if (descriptor.clazz == SSHConnector.class || descriptor.clazz == ProxmoxJNLPConnector.class) {
+                    filtered.add(descriptor);
+                }
+            }
+            return filtered;
+        }
+
         public ListBoxModel doFillApiTokenCredentialIdItems(@QueryParameter String apiTokenCredentialId) {
             Jenkins jenkins = Jenkins.get();
             StandardListBoxModel options = new StandardListBoxModel();
@@ -1304,10 +1294,6 @@ public class ProxmoxCloud extends Cloud {
             }
 
             return FormValidation.ok();
-        }
-
-        public boolean isSSHLauncher(ComputerLauncher launcher) {
-            return launcher instanceof SSHLauncher;
         }
 
         @Override

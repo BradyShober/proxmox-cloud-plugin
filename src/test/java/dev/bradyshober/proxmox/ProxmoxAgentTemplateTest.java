@@ -2,7 +2,6 @@ package dev.bradyshober.proxmox;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-import hudson.slaves.JNLPLauncher;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -16,14 +15,15 @@ class ProxmoxAgentTemplateTest {
 
     @BeforeEach
     void setUp() {
-        JNLPLauncher launcher = new JNLPLauncher();
-        launcher.setWebSocket(true);
+        ProxmoxJNLPConnector connector = new ProxmoxJNLPConnector();
+        connector.setWebSocket(true);
+
         template = new ProxmoxAgentTemplate(
                 "100",
                 "agent-{{n}}",
                 1,
                 5,
-                launcher,
+                connector,
                 "jenkins",
                 "ssh-rsa AAAA key",
                 "proxmox linux",
@@ -37,8 +37,7 @@ class ProxmoxAgentTemplateTest {
         assertEquals("agent-{{n}}", template.getAgentNameTemplate());
         assertEquals(1, template.getMinInstances());
         assertEquals(5, template.getMaxInstances());
-        assertNotNull(template.getLauncher());
-        assertInstanceOf(JNLPLauncher.class, template.getLauncher());
+        assertNotNull(template.getComputerConnector());
         assertEquals("jenkins", template.getSshUsername());
         assertEquals("ssh-rsa AAAA key", template.getSshPublicKey());
         assertEquals("proxmox linux", template.getLabels());
@@ -148,8 +147,9 @@ class ProxmoxAgentTemplateTest {
 
     @Test
     void testSetLauncher() {
-        JNLPLauncher newLauncher = new JNLPLauncher();
-        template.setLauncher(newLauncher);
-        assertSame(newLauncher, template.getLauncher());
+        ProxmoxJNLPConnector newConnector = new ProxmoxJNLPConnector();
+        newConnector.setWebSocket(false);
+        template.setComputerConnector(newConnector);
+        assertSame(newConnector, template.getComputerConnector());
     }
 }

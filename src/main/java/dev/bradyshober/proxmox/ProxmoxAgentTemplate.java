@@ -1,16 +1,18 @@
 package dev.bradyshober.proxmox;
 
-import hudson.slaves.ComputerLauncher;
+import hudson.slaves.ComputerConnector;
 
 /**
  * Configuration for a Proxmox VM agent template.
+ * Stores connector configuration WITHOUT a fixed host - the host is resolved
+ * at provisioning time from the actual VM, then passed to connector.launch(host, ...).
  */
 public class ProxmoxAgentTemplate {
     private String templateVmId;
     private String agentNameTemplate;
     private int minInstances;
     private int maxInstances;
-    private ComputerLauncher launcher;
+    private ComputerConnector computerConnector;
     private String sshUsername;
     private String sshPublicKey;
     private String labels;
@@ -25,7 +27,7 @@ public class ProxmoxAgentTemplate {
             String agentNameTemplate,
             int minInstances,
             int maxInstances,
-            ComputerLauncher launcher,
+            ComputerConnector computerConnector,
             String sshUsername,
             String sshPublicKey,
             String labels,
@@ -35,7 +37,7 @@ public class ProxmoxAgentTemplate {
         this.agentNameTemplate = agentNameTemplate;
         this.minInstances = minInstances;
         this.maxInstances = maxInstances;
-        this.launcher = launcher;
+        this.computerConnector = computerConnector;
         this.sshUsername = sshUsername;
         this.sshPublicKey = sshPublicKey;
         this.labels = labels;
@@ -78,12 +80,12 @@ public class ProxmoxAgentTemplate {
         this.maxInstances = maxInstances;
     }
 
-    public ComputerLauncher getLauncher() {
-        return launcher;
+    public ComputerConnector getComputerConnector() {
+        return computerConnector;
     }
 
-    public void setLauncher(ComputerLauncher launcher) {
-        this.launcher = launcher;
+    public void setComputerConnector(ComputerConnector computerConnector) {
+        this.computerConnector = computerConnector;
     }
 
     public String getSshUsername() {

@@ -882,34 +882,136 @@ public class ProxmoxClient {
     public void configureVmCloudInit(String vmId, String ciUser, String sshPublicKey, String tags) throws Exception {
         String path = String.format("%s/api2/json/nodes/%s/qemu/%s/config", serverConfig.getHost(), nodeForVm, vmId);
 
-        FormBody.Builder bodyBuilder = new FormBody.Builder();
-
-        if (ciUser != null && !ciUser.isBlank()) {
-            bodyBuilder.add("ciuser", ciUser.trim());
-        }
-
+        String normalizedSshKey = null;
         if (sshPublicKey != null && !sshPublicKey.isBlank()) {
-            String encodedKey =
-                    java.net.URLEncoder.encode(sshPublicKey.trim(), java.nio.charset.StandardCharsets.UTF_8);
-            bodyBuilder.add("sshkeys", encodedKey);
+            normalizedSshKey = normalizeSshPublicKey(sshPublicKey);
         }
 
-        // Always request DHCP on the primary NIC so the VM gets a routable IP
-        bodyBuilder.add("ipconfig0", "ip=dhcp");
-
-        if (tags != null && !tags.isBlank()) {
-            bodyBuilder.add("tags", tags.trim());
-        }
+        RequestBody requestBody = buildCloudInitRequestBody(ciUser, normalizedSshKey, tags, false);
 
         // PUT /config is asynchronous when Proxmox regenerates the cloud-init ISO.
         // It returns a task UPID and locks the VM; we must wait for the task before
         // calling startVm(), otherwise the start will fail with "VM is locked".
-        String taskUpid = putRequestReturningTask(path, bodyBuilder.build());
+        String taskUpid;
+        try {
+            taskUpid = putRequestReturningTask(path, requestBody);
+        } catch (IOException firstError) {
+            if (normalizedSshKey != null && isInvalidUrlEncodedSshKeyError(firstError)) {
+                LOGGER.log(
+                        Level.WARNING,
+                        "Proxmox rejected sshkeys as invalid urlencoded string; retrying with compatibility encoding for VM "
+                                + vmId);
+                RequestBody fallbackBody = buildCloudInitRequestBody(ciUser, normalizedSshKey, tags, true);
+                taskUpid = putRequestReturningTask(path, fallbackBody);
+            } else {
+                throw firstError;
+            }
+        }
         if (taskUpid != null && !taskUpid.isBlank()) {
             LOGGER.log(Level.FINE, "Waiting for cloud-init config task " + taskUpid + " on VM " + vmId);
             waitForTask(taskUpid);
         }
         LOGGER.log(Level.FINE, "Configured VM params (ciuser, sshkeys, ipconfig0, tags) for VM " + vmId);
+    }
+
+    private RequestBody buildCloudInitRequestBody(
+            String ciUser, String normalizedSshKey, String tags, boolean doubleEncodeSshKeys) {
+        StringBuilder form = new StringBuilder();
+        if (ciUser != null && !ciUser.isBlank()) {
+            appendFormField(form, "ciuser", ciUser.trim());
+        }
+
+        if (normalizedSshKey != null && !normalizedSshKey.isBlank()) {
+            if (doubleEncodeSshKeys) {
+                String onceEncoded = encodeFormComponent(normalizedSshKey);
+                appendFormField(form, "sshkeys", onceEncoded);
+            } else {
+                appendFormField(form, "sshkeys", normalizedSshKey);
+            }
+        }
+
+        appendFormField(form, "ipconfig0", "ip=dhcp");
+
+        if (tags != null && !tags.isBlank()) {
+            appendFormField(form, "tags", tags.trim());
+        }
+
+        return RequestBody.create(form.toString(), MediaType.get("application/x-www-form-urlencoded; charset=utf-8"));
+    }
+
+    private boolean isInvalidUrlEncodedSshKeyError(IOException error) {
+        if (error == null || error.getMessage() == null) {
+            return false;
+        }
+        String message = error.getMessage();
+        return message.contains("sshkeys") && message.contains("invalid urlencoded string");
+    }
+
+    private static void appendFormField(StringBuilder form, String key, String value) {
+        if (value == null) {
+            return;
+        }
+        if (form.length() > 0) {
+            form.append('&');
+        }
+        form.append(encodeFormComponent(key)).append('=').append(encodeFormComponent(value));
+    }
+
+    private static String encodeFormComponent(String value) {
+        return java.net.URLEncoder.encode(value, java.nio.charset.StandardCharsets.UTF_8)
+                .replace("+", "%20");
+    }
+
+    /**
+     * Normalize pasted SSH public key content so wrapped base64 lines from textareas are repaired.
+     * Proxmox expects a single-line OpenSSH key (or newline-delimited keys), not arbitrary wrapped chunks.
+     */
+    static String normalizeSshPublicKey(String sshPublicKey) {
+        if (sshPublicKey == null) {
+            return "";
+        }
+
+        String compact =
+                sshPublicKey.replace('\r', ' ').replace('\n', ' ').trim().replaceAll("\\s+", " ");
+        if (compact.isBlank()) {
+            return compact;
+        }
+
+        String[] parts = compact.split(" ");
+        if (parts.length <= 3) {
+            return compact;
+        }
+
+        String keyType = parts[0];
+        if (!isOpenSshKeyType(keyType)) {
+            return compact;
+        }
+
+        boolean trailingComment = !isLikelyBase64Token(parts[parts.length - 1]);
+        int base64EndExclusive = trailingComment ? parts.length - 1 : parts.length;
+
+        StringBuilder base64Builder = new StringBuilder();
+        for (int i = 1; i < base64EndExclusive; i++) {
+            base64Builder.append(parts[i]);
+        }
+
+        String normalized = keyType + " " + base64Builder;
+        if (trailingComment) {
+            normalized += " " + parts[parts.length - 1];
+        }
+        return normalized;
+    }
+
+    private static boolean isOpenSshKeyType(String keyType) {
+        return keyType.startsWith("ssh-")
+                || keyType.startsWith("ecdsa-")
+                || keyType.startsWith("sk-")
+                || "ed25519".equals(keyType)
+                || "rsa".equals(keyType);
+    }
+
+    private static boolean isLikelyBase64Token(String token) {
+        return token != null && token.matches("[A-Za-z0-9+/=]+$");
     }
 
     /**

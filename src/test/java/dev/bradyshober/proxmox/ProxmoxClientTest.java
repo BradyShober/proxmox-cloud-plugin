@@ -190,4 +190,55 @@ class ProxmoxClientTest {
         assertNotNull(vms);
         assertTrue(vms.isEmpty());
     }
+
+    @Test
+    void testConfigureVmCloudInitDoesNotDoubleEncodeSshKey(JenkinsRule j) throws Exception {
+        addCredential(j);
+        enqueueVersionOk();
+        mockWebServer.enqueue(new MockResponse()
+                .setResponseCode(200)
+                .setBody("{\"data\":\"UPID:pve:00000001:00000001:00000001:qmconfig:900:root@pam:\"}"));
+        mockWebServer.enqueue(new MockResponse()
+                .setResponseCode(200)
+                .setBody("{\"data\":{\"status\":\"stopped\",\"exitstatus\":\"OK\"}}"));
+
+        ProxmoxClient client = new ProxmoxClient(serverConfig(false));
+        String sshKey = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCtest user@host";
+        client.configureVmCloudInit("900", "jenkins", sshKey, "jenkins-proxmox-plugin");
+
+        mockWebServer.takeRequest(); // version check
+        RecordedRequest putConfigRequest = mockWebServer.takeRequest();
+        assertEquals("PUT", putConfigRequest.getMethod());
+        assertEquals("/api2/json/nodes/pve/qemu/900/config", putConfigRequest.getPath());
+
+        String body = putConfigRequest.getBody().readUtf8();
+        assertTrue(body.contains("sshkeys="), "Expected sshkeys field in request body");
+        assertTrue(body.contains("ssh-rsa%20"), "Expected ssh key to be URL-encoded once: " + body);
+        assertFalse(body.contains("%2520"), "Request should not contain double-encoded spaces: " + body);
+        assertFalse(body.contains("%2540"), "Request should not contain double-encoded @: " + body);
+    }
+
+    @Test
+    void testConfigureVmCloudInitNormalizesWrappedSshKey(JenkinsRule j) throws Exception {
+        addCredential(j);
+        enqueueVersionOk();
+        mockWebServer.enqueue(new MockResponse()
+                .setResponseCode(200)
+                .setBody("{\"data\":\"UPID:pve:00000002:00000002:00000002:qmconfig:901:root@pam:\"}"));
+        mockWebServer.enqueue(new MockResponse()
+                .setResponseCode(200)
+                .setBody("{\"data\":{\"status\":\"stopped\",\"exitstatus\":\"OK\"}}"));
+
+        ProxmoxClient client = new ProxmoxClient(serverConfig(false));
+        String wrappedKey = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCt+abc/def\n" + "ghi+jkl/mno+pqr== brady@jenkins\n";
+        client.configureVmCloudInit("901", "jenkins", wrappedKey, "jenkins-proxmox-plugin");
+
+        mockWebServer.takeRequest(); // version check
+        RecordedRequest putConfigRequest = mockWebServer.takeRequest();
+        String body = putConfigRequest.getBody().readUtf8();
+
+        assertFalse(body.contains("%0A"), "Normalized sshkeys should not include encoded newlines: " + body);
+        assertTrue(body.contains("%2B"), "Base64 plus signs must be preserved as %2B: " + body);
+        assertTrue(body.contains("brady%40jenkins"), "Comment should remain URL-encoded: " + body);
+    }
 }
