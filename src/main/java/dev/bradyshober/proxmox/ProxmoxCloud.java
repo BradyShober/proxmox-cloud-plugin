@@ -576,9 +576,9 @@ public class ProxmoxCloud extends Cloud {
             throw new IOException("No connector configured for launching agents");
         }
         if (ipAddress == null || ipAddress.isBlank()) {
-            // For inbound (JNLP) connectors, null IP is acceptable
+            // For inbound (JNLP) connectors, the host parameter is ignored and may not be null.
             if (isInboundConnector(connector)) {
-                return connector.launch(null, TaskListener.NULL);
+                return connector.launch("", TaskListener.NULL);
             }
             // Outbound connectors require an address
             throw new IOException("Outbound connector requires a resolved VM IP address");
