@@ -600,7 +600,7 @@ public class ProxmoxCloud extends Cloud {
     String buildCloudOwnershipTag() {
         String sanitizedCloudName =
                 name == null ? "" : name.trim().toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9_.-]", "-");
-        sanitizedCloudName = sanitizedCloudName.replaceAll("-+", "-").replaceAll("^-|-$", "");
+        sanitizedCloudName = sanitizedCloudName.replaceAll("-+", "-").replaceAll("(^-)|(-$)", "");
         if (sanitizedCloudName.isBlank()) {
             sanitizedCloudName = "default";
         }
