@@ -27,6 +27,7 @@ import org.kohsuke.stapler.DataBoundSetter;
 public class ProxmoxRetentionStrategy extends RetentionStrategy<SlaveComputer> {
     private static final Logger LOGGER = Logger.getLogger(ProxmoxRetentionStrategy.class.getName());
     private static final String AGENT_PREFIX = "Agent ";
+    private static final String NULL_TASK_DISPLAY = "<null>";
 
     /** Default idle timeout before the VM is terminated (5 minutes). */
     public static final int DEFAULT_IDLE_MINUTES = 5;
@@ -291,7 +292,7 @@ public class ProxmoxRetentionStrategy extends RetentionStrategy<SlaveComputer> {
             LOGGER.log(
                     Level.FINEST,
                     "taskAccepted bridge invoked for task {0}",
-                    task != null ? task.getDisplayName() : "<null>");
+                    task != null ? task.getDisplayName() : NULL_TASK_DISPLAY);
         }
         taskAccepted(executor);
     }
@@ -304,7 +305,7 @@ public class ProxmoxRetentionStrategy extends RetentionStrategy<SlaveComputer> {
     public void taskCompleted(Executor executor, Queue.Task task, long durationMS) {
         if (LOGGER.isLoggable(Level.FINEST)) {
             LOGGER.log(Level.FINEST, "taskCompleted bridge invoked for task {0} (durationMs={1})", new Object[] {
-                task != null ? task.getDisplayName() : "<null>", durationMS
+                task != null ? task.getDisplayName() : NULL_TASK_DISPLAY, durationMS
             });
         }
         taskCompleted(executor);
@@ -320,7 +321,8 @@ public class ProxmoxRetentionStrategy extends RetentionStrategy<SlaveComputer> {
             LOGGER.log(
                     Level.FINEST,
                     "taskCompletedWithProblems bridge invoked for task {0} (durationMs={1}, hasProblems={2})",
-                    new Object[] {task != null ? task.getDisplayName() : "<null>", durationMS, problems != null});
+                    new Object[] {task != null ? task.getDisplayName() : NULL_TASK_DISPLAY, durationMS, problems != null
+                    });
         }
         taskCompletedWithProblems(executor);
     }

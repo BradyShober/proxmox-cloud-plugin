@@ -654,57 +654,13 @@ public class ProxmoxCloud extends Cloud {
         int discovered = 0;
         int restored = 0;
         for (ProxmoxClient.ProxmoxVmSummary vm : proxmoxClient.listNodeVms()) {
-            if (vm == null || !isManagedVmTags(vm.getTags())) {
+            if (!isReconciliationCandidate(vm)) {
                 continue;
             }
-
             discovered++;
-            String vmId = vm.getVmId();
-            if (vmId == null || vmId.isBlank()) {
-                continue;
+            if (reattachVmNodeIfEligible(jenkins, vm)) {
+                restored++;
             }
-
-            if (findNodeByVmId(jenkins, vmId) != null) {
-                continue;
-            }
-
-            String status = vm.getStatus() == null ? "" : vm.getStatus().toLowerCase(Locale.ROOT);
-            if (!("running".equals(status) || "starting".equals(status))) {
-                LOGGER.log(
-                        Level.FINE,
-                        "Skipping VM " + vmId + " during reconciliation because status is '" + status + "'");
-                continue;
-            }
-
-            String agentName = (vm.getName() == null || vm.getName().isBlank())
-                    ? (agentTemplate.getAgentNameTemplate() + "-" + vmId)
-                    : vm.getName();
-
-            if (jenkins.getNode(agentName) != null) {
-                LOGGER.log(
-                        Level.WARNING,
-                        "Skipping VM " + vmId + " reconciliation because node name already exists: " + agentName);
-                continue;
-            }
-
-            String ipAddress = null;
-            if (!isInboundConnector(agentTemplate.getComputerConnector())) {
-                try {
-                    ipAddress = proxmoxClient.getVmIpAddress(vmId);
-                } catch (Exception e) {
-                    LOGGER.log(
-                            Level.WARNING,
-                            "Skipping node re-attachment for VM " + vmId
-                                    + " because IP could not be resolved via guest agent",
-                            e);
-                    continue;
-                }
-            }
-
-            ProxmoxNode recoveredNode = buildDumbSlave(agentName, vmId, ipAddress);
-            jenkins.addNode(recoveredNode);
-            instances.add(new ProxmoxInstance(vmId, agentName));
-            restored++;
         }
 
         if (discovered > 0) {
@@ -712,6 +668,77 @@ public class ProxmoxCloud extends Cloud {
                     Level.INFO,
                     "Cloud ''{0}'': reconciled {1}/{2} tagged VM(s) back into Jenkins after startup",
                     new Object[] {name, restored, discovered});
+        }
+    }
+
+    private boolean isReconciliationCandidate(ProxmoxClient.ProxmoxVmSummary vm) {
+        return vm != null && isManagedVmTags(vm.getTags());
+    }
+
+    private boolean reattachVmNodeIfEligible(Jenkins jenkins, ProxmoxClient.ProxmoxVmSummary vm) throws Exception {
+        String vmId = vm.getVmId();
+        if (vmId == null || vmId.isBlank() || findNodeByVmId(jenkins, vmId) != null) {
+            return false;
+        }
+
+        if (!isRecoverableVmState(vmId, vm.getStatus())) {
+            return false;
+        }
+
+        String agentName = resolveRecoveredAgentName(vm);
+        if (jenkins.getNode(agentName) != null) {
+            LOGGER.log(
+                    Level.WARNING,
+                    "Skipping VM {0} reconciliation because node name already exists: {1}",
+                    new Object[] {vmId, agentName});
+            return false;
+        }
+
+        String ipAddress = resolveReconciledVmIp(vmId);
+        if (ipAddress == null && !isInboundConnector(agentTemplate.getComputerConnector())) {
+            return false;
+        }
+
+        ProxmoxNode recoveredNode = buildDumbSlave(agentName, vmId, ipAddress);
+        jenkins.addNode(recoveredNode);
+        instances.add(new ProxmoxInstance(vmId, agentName));
+        return true;
+    }
+
+    private boolean isRecoverableVmState(String vmId, String status) {
+        String normalized = status == null ? "" : status.toLowerCase(Locale.ROOT);
+        if ("running".equals(normalized) || "starting".equals(normalized)) {
+            return true;
+        }
+
+        LOGGER.log(Level.FINE, "Skipping VM {0} during reconciliation because status is ''{1}''", new Object[] {
+            vmId, normalized
+        });
+        return false;
+    }
+
+    private String resolveRecoveredAgentName(ProxmoxClient.ProxmoxVmSummary vm) {
+        String vmName = vm.getName();
+        if (vmName == null || vmName.isBlank()) {
+            return agentTemplate.getAgentNameTemplate() + "-" + vm.getVmId();
+        }
+        return vmName;
+    }
+
+    private String resolveReconciledVmIp(String vmId) {
+        if (isInboundConnector(agentTemplate.getComputerConnector())) {
+            return null;
+        }
+
+        try {
+            return proxmoxClient.getVmIpAddress(vmId);
+        } catch (Exception e) {
+            LOGGER.log(
+                    Level.WARNING,
+                    "Skipping node re-attachment for VM {0} because IP could not be resolved via guest agent",
+                    vmId);
+            LOGGER.log(Level.FINE, "IP resolution failure details", e);
+            return null;
         }
     }
 

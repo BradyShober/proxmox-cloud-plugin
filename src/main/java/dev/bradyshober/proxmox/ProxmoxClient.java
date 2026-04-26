@@ -387,62 +387,82 @@ public class ProxmoxClient {
      * @throws Exception if the request fails or the command exits non-zero
      */
     public void execCommandViaGuestAgent(String vmId, String... commandAndArgs) throws Exception {
+        validateGuestAgentCommand(commandAndArgs);
+        String execPath =
+                String.format("%s/api2/json/nodes/%s/qemu/%s/agent/exec", serverConfig.getHost(), nodeForVm, vmId);
+        int pid = startGuestAgentExec(vmId, execPath, commandAndArgs);
+        waitForGuestAgentExecCompletion(vmId, pid, commandAndArgs);
+    }
+
+    private void validateGuestAgentCommand(String... commandAndArgs) {
         if (commandAndArgs == null
                 || commandAndArgs.length == 0
                 || commandAndArgs[0] == null
                 || commandAndArgs[0].isBlank()) {
             throw new IllegalArgumentException("commandAndArgs must include a non-empty command");
         }
+    }
 
-        String path =
-                String.format("%s/api2/json/nodes/%s/qemu/%s/agent/exec", serverConfig.getHost(), nodeForVm, vmId);
-
-        int pid = startGuestAgentExec(vmId, path, commandAndArgs);
-
-        // Poll exec-status until the process exits
+    private void waitForGuestAgentExecCompletion(String vmId, int pid, String... commandAndArgs) throws Exception {
         String statusPath = String.format(
                 "%s/api2/json/nodes/%s/qemu/%s/agent/exec-status?pid=%d", serverConfig.getHost(), nodeForVm, vmId, pid);
         int maxAttempts = 60;
         for (int attempt = 0; attempt < maxAttempts; attempt++) {
-            Request statusReq = new Request.Builder()
-                    .url(statusPath)
-                    .get()
-                    .addHeader(AUTHORIZATION_HEADER, authToken)
-                    .build();
-            try (Response response = httpClient.newCall(statusReq).execute()) {
-                if (response.isSuccessful()) {
-                    okhttp3.ResponseBody respBody = response.body();
-                    String responseBody = respBody != null ? respBody.string() : "{}";
-                    JsonObject json = gson.fromJson(responseBody, JsonObject.class);
-                    if (json != null && json.has("data")) {
-                        JsonObject data = json.getAsJsonObject("data");
-                        if (data.has("exited") && data.get("exited").getAsInt() == 1) {
-                            int exitCode =
-                                    data.has("exitcode") ? data.get("exitcode").getAsInt() : 0;
-                            String cmd = String.join(" ", commandAndArgs);
-                            if (exitCode != 0) {
-                                String stdErr = decodeExecDataField(data, "err-data");
-                                String stdOut = decodeExecDataField(data, "out-data");
-                                throw new IOException("Guest-agent command failed (exit " + exitCode + "): " + cmd
-                                        + (stdErr.isBlank() ? "" : " | stderr: " + stdErr)
-                                        + (stdOut.isBlank() ? "" : " | stdout: " + stdOut));
-                            }
-
-                            String stdErr = decodeExecDataField(data, "err-data");
-                            if (!stdErr.isBlank()) {
-                                LOGGER.log(
-                                        Level.FINE, "Guest-agent stderr for ''{0}'': {1}", new Object[] {cmd, stdErr});
-                            }
-                            LOGGER.log(Level.FINE, "Guest-agent command OK: {0}", cmd);
-                            return;
-                        }
-                    }
-                }
+            if (checkGuestAgentExecStatus(statusPath, commandAndArgs)) {
+                return;
             }
             Thread.sleep(2000);
         }
-        LOGGER.log(Level.WARNING, () -> "Guest-agent command timed out: " + String.join(" ", commandAndArgs));
-        throw new IOException("Guest-agent command timed out: " + String.join(" ", commandAndArgs));
+
+        String command = String.join(" ", commandAndArgs);
+        LOGGER.log(Level.WARNING, () -> "Guest-agent command timed out: " + command);
+        throw new IOException("Guest-agent command timed out: " + command);
+    }
+
+    private boolean checkGuestAgentExecStatus(String statusPath, String... commandAndArgs) throws IOException {
+        Request statusReq = new Request.Builder()
+                .url(statusPath)
+                .get()
+                .addHeader(AUTHORIZATION_HEADER, authToken)
+                .build();
+        try (Response response = httpClient.newCall(statusReq).execute()) {
+            if (!response.isSuccessful()) {
+                return false;
+            }
+
+            okhttp3.ResponseBody respBody = response.body();
+            String responseBody = respBody != null ? respBody.string() : "{}";
+            JsonObject json = gson.fromJson(responseBody, JsonObject.class);
+            if (json == null || !json.has("data")) {
+                return false;
+            }
+
+            JsonObject data = json.getAsJsonObject("data");
+            if (!data.has("exited") || data.get("exited").getAsInt() != 1) {
+                return false;
+            }
+
+            verifyGuestAgentExitStatus(data, commandAndArgs);
+            return true;
+        }
+    }
+
+    private void verifyGuestAgentExitStatus(JsonObject data, String... commandAndArgs) throws IOException {
+        int exitCode = data.has("exitcode") ? data.get("exitcode").getAsInt() : 0;
+        String cmd = String.join(" ", commandAndArgs);
+        if (exitCode != 0) {
+            String stdErr = decodeExecDataField(data, "err-data");
+            String stdOut = decodeExecDataField(data, "out-data");
+            throw new IOException("Guest-agent command failed (exit " + exitCode + "): " + cmd
+                    + (stdErr.isBlank() ? "" : " | stderr: " + stdErr)
+                    + (stdOut.isBlank() ? "" : " | stdout: " + stdOut));
+        }
+
+        String stdErr = decodeExecDataField(data, "err-data");
+        if (!stdErr.isBlank()) {
+            LOGGER.log(Level.FINE, "Guest-agent stderr for ''{0}'': {1}", new Object[] {cmd, stdErr});
+        }
+        LOGGER.log(Level.FINE, "Guest-agent command OK: {0}", cmd);
     }
 
     private int startGuestAgentExec(String vmId, String path, String... commandAndArgs) throws IOException {
@@ -450,11 +470,7 @@ public class ProxmoxClient {
         String cmd = toLegacyCommandLine(commandAndArgs);
 
         for (int attempt = 1; attempt <= maxAttempts; attempt++) {
-            com.google.gson.JsonArray commandArray = new com.google.gson.JsonArray();
-            for (String part : commandAndArgs) {
-                commandArray.add(part);
-            }
-
+            com.google.gson.JsonArray commandArray = toJsonArray(commandAndArgs);
             JsonObject payload = new JsonObject();
             payload.add("command", commandArray);
             RequestBody body = RequestBody.create(payload.toString(), MediaType.get("application/json"));
@@ -469,7 +485,7 @@ public class ProxmoxClient {
                 String responseBody = respBody != null ? respBody.string() : "";
 
                 if (!response.isSuccessful()) {
-                    if (response.code() == 596 && attempt < maxAttempts) {
+                    if (shouldRetryGuestExec(response.code(), attempt, maxAttempts)) {
                         boolean pingOk = isGuestAgentPingSuccessful(vmId);
                         LOGGER.log(
                                 Level.FINE,
@@ -494,6 +510,18 @@ public class ProxmoxClient {
         }
 
         throw new IOException("guest-agent exec failed after retries for command: " + cmd);
+    }
+
+    private com.google.gson.JsonArray toJsonArray(String... commandAndArgs) {
+        com.google.gson.JsonArray commandArray = new com.google.gson.JsonArray();
+        for (String part : commandAndArgs) {
+            commandArray.add(part);
+        }
+        return commandArray;
+    }
+
+    private boolean shouldRetryGuestExec(int responseCode, int attempt, int maxAttempts) {
+        return responseCode == 596 && attempt < maxAttempts;
     }
 
     private void sleepBeforeRetry(int attempt) throws IOException {
@@ -630,37 +658,50 @@ public class ProxmoxClient {
 
             okhttp3.ResponseBody body = response.body();
             String responseBody = body != null ? body.string() : "{}";
-            JsonObject json = gson.fromJson(responseBody, JsonObject.class);
+            return parseVmSummaries(responseBody);
+        }
+    }
 
-            List<ProxmoxVmSummary> vms = new ArrayList<>();
-            if (json == null || !json.has("data") || !json.get("data").isJsonArray()) {
-                return vms;
-            }
-
-            for (com.google.gson.JsonElement elem : json.getAsJsonArray("data")) {
-                if (!elem.isJsonObject()) {
-                    continue;
-                }
-                JsonObject vm = elem.getAsJsonObject();
-                String vmId = vm.has("vmid") && !vm.get("vmid").isJsonNull()
-                        ? vm.get("vmid").getAsString()
-                        : null;
-                if (vmId == null || vmId.isBlank()) {
-                    continue;
-                }
-                String name = vm.has("name") && !vm.get("name").isJsonNull()
-                        ? vm.get("name").getAsString()
-                        : null;
-                String status = vm.has(STATUS_FIELD) && !vm.get(STATUS_FIELD).isJsonNull()
-                        ? vm.get(STATUS_FIELD).getAsString()
-                        : null;
-                String tags = vm.has("tags") && !vm.get("tags").isJsonNull()
-                        ? vm.get("tags").getAsString()
-                        : "";
-                vms.add(new ProxmoxVmSummary(vmId, name, status, tags));
-            }
+    private List<ProxmoxVmSummary> parseVmSummaries(String responseBody) {
+        JsonObject json = gson.fromJson(responseBody, JsonObject.class);
+        List<ProxmoxVmSummary> vms = new ArrayList<>();
+        if (json == null || !json.has("data") || !json.get("data").isJsonArray()) {
             return vms;
         }
+
+        for (com.google.gson.JsonElement elem : json.getAsJsonArray("data")) {
+            ProxmoxVmSummary summary = parseVmSummary(elem);
+            if (summary != null) {
+                vms.add(summary);
+            }
+        }
+        return vms;
+    }
+
+    private ProxmoxVmSummary parseVmSummary(com.google.gson.JsonElement elem) {
+        if (elem == null || !elem.isJsonObject()) {
+            return null;
+        }
+
+        JsonObject vm = elem.getAsJsonObject();
+        String vmId = readNullableField(vm, "vmid");
+        if (vmId == null || vmId.isBlank()) {
+            return null;
+        }
+
+        String name = readNullableField(vm, "name");
+        String status = readNullableField(vm, STATUS_FIELD);
+        String tags = readNullableField(vm, "tags");
+        return new ProxmoxVmSummary(vmId, name, status, tags == null ? "" : tags);
+    }
+
+    private String readNullableField(JsonObject jsonObject, String fieldName) {
+        if (jsonObject == null
+                || !jsonObject.has(fieldName)
+                || jsonObject.get(fieldName).isJsonNull()) {
+            return null;
+        }
+        return jsonObject.get(fieldName).getAsString();
     }
 
     /**
@@ -671,13 +712,7 @@ public class ProxmoxClient {
      * @throws Exception if the query fails
      */
     public boolean isTaskComplete(String upid) throws Exception {
-        // Parse UPID to extract node and task ID
-        // Format: UPID:node:pid:starttime:type:id:user
-        String[] parts = upid.split(":");
-        if (parts.length < 7) {
-            throw new IllegalArgumentException("Invalid UPID format: " + upid);
-        }
-        String node = parts[1];
+        String node = extractNodeFromUpid(upid);
 
         String path = String.format("%s/api2/json/nodes/%s/tasks/%s/status", serverConfig.getHost(), node, upid);
 
@@ -691,38 +726,45 @@ public class ProxmoxClient {
             if (!response.isSuccessful()) {
                 okhttp3.ResponseBody body = response.body();
                 String responseBody = body != null ? body.string() : "";
-                LOGGER.log(
-                        Level.FINE,
-                        "Failed to get task status for " + upid + ": HTTP " + response.code() + " " + responseBody);
+                LOGGER.log(Level.FINE, "Failed to get task status for {0}: HTTP {1} {2}", new Object[] {
+                    upid, response.code(), responseBody
+                });
                 return false;
             }
 
             okhttp3.ResponseBody body = response.body();
             String responseBody = body != null ? body.string() : "{}";
-            JsonObject jsonResponse = gson.fromJson(responseBody, JsonObject.class);
+            return parseTaskCompletionStatus(upid, responseBody);
+        }
+    }
 
-            if (jsonResponse != null && jsonResponse.has("data")) {
-                JsonObject data = jsonResponse.getAsJsonObject("data");
-                String status =
-                        data.has(STATUS_FIELD) && !data.get(STATUS_FIELD).isJsonNull()
-                                ? data.get(STATUS_FIELD).getAsString()
-                                : "unknown";
-                String exitStatus = data.has(EXITSTATUS_FIELD)
-                                && !data.get(EXITSTATUS_FIELD).isJsonNull()
-                        ? data.get(EXITSTATUS_FIELD).getAsString()
-                        : "null";
-                String endTime =
-                        data.has(ENDTIME_FIELD) && !data.get(ENDTIME_FIELD).isJsonNull()
-                                ? data.get(ENDTIME_FIELD).getAsString()
-                                : "null";
-                LOGGER.log(Level.FINE, "Task status for {0}: status={1}, exitstatus={2}, endtime={3}", new Object[] {
-                    upid, status, exitStatus, endTime
-                });
-                return isCompletedTaskStatus(data);
-            }
-            LOGGER.log(Level.FINE, "Task status for " + upid + ": response contained no data block");
+    private String extractNodeFromUpid(String upid) {
+        // Format: UPID:node:pid:starttime:type:id:user
+        String[] parts = upid.split(":");
+        if (parts.length < 7) {
+            throw new IllegalArgumentException("Invalid UPID format: " + upid);
+        }
+        return parts[1];
+    }
+
+    private boolean parseTaskCompletionStatus(String upid, String responseBody) {
+        JsonObject jsonResponse = gson.fromJson(responseBody, JsonObject.class);
+        if (jsonResponse == null || !jsonResponse.has("data")) {
+            LOGGER.log(Level.FINE, "Task status for {0}: response contained no data block", upid);
             return false;
         }
+
+        JsonObject data = jsonResponse.getAsJsonObject("data");
+        String status = readNullableField(data, STATUS_FIELD);
+        String exitStatus = readNullableField(data, EXITSTATUS_FIELD);
+        String endTime = readNullableField(data, ENDTIME_FIELD);
+        LOGGER.log(Level.FINE, "Task status for {0}: status={1}, exitstatus={2}, endtime={3}", new Object[] {
+            upid,
+            status == null ? "unknown" : status,
+            exitStatus == null ? "null" : exitStatus,
+            endTime == null ? "null" : endTime
+        });
+        return isCompletedTaskStatus(data);
     }
 
     /**
@@ -848,31 +890,57 @@ public class ProxmoxClient {
      * network-get-interfaces response.
      */
     private String extractFirstIpv4(JsonObject json) {
-        if (json == null || !json.has("data")) return null;
+        if (json == null || !json.has("data")) {
+            return null;
+        }
+
         JsonObject data = json.getAsJsonObject("data");
-        if (!data.has("result")) return null;
+        if (data == null || !data.has("result") || !data.get("result").isJsonArray()) {
+            return null;
+        }
 
         com.google.gson.JsonArray interfaces = data.getAsJsonArray("result");
         for (com.google.gson.JsonElement elem : interfaces) {
-            JsonObject iface = elem.getAsJsonObject();
-            String name = iface.has("name") ? iface.get("name").getAsString() : "";
-            if ("lo".equals(name)) continue;
-            if (!iface.has("ip-addresses")) continue;
-
-            for (com.google.gson.JsonElement ipElem : iface.getAsJsonArray("ip-addresses")) {
-                JsonObject ipObj = ipElem.getAsJsonObject();
-                String type = ipObj.has("ip-address-type")
-                        ? ipObj.get("ip-address-type").getAsString()
-                        : "";
-                if ("ipv4".equals(type) && ipObj.has("ip-address")) {
-                    String addr = ipObj.get("ip-address").getAsString();
-                    if (!addr.startsWith("127.")) {
-                        return addr;
-                    }
-                }
+            String ip = extractInterfaceIpv4(elem);
+            if (ip != null) {
+                return ip;
             }
         }
         return null;
+    }
+
+    private String extractInterfaceIpv4(com.google.gson.JsonElement interfaceElement) {
+        if (interfaceElement == null || !interfaceElement.isJsonObject()) {
+            return null;
+        }
+
+        JsonObject iface = interfaceElement.getAsJsonObject();
+        if ("lo".equals(readNullableField(iface, "name")) || !iface.has("ip-addresses")) {
+            return null;
+        }
+
+        for (com.google.gson.JsonElement ipElem : iface.getAsJsonArray("ip-addresses")) {
+            String ip = extractIpv4Address(ipElem);
+            if (ip != null) {
+                return ip;
+            }
+        }
+        return null;
+    }
+
+    private String extractIpv4Address(com.google.gson.JsonElement ipElement) {
+        if (ipElement == null || !ipElement.isJsonObject()) {
+            return null;
+        }
+
+        JsonObject ipObj = ipElement.getAsJsonObject();
+        String type = readNullableField(ipObj, "ip-address-type");
+        if (!"ipv4".equals(type) || !ipObj.has("ip-address")) {
+            return null;
+        }
+
+        String addr = ipObj.get("ip-address").getAsString();
+        return addr.startsWith("127.") ? null : addr;
     }
 
     /**
