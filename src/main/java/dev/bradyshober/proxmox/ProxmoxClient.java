@@ -39,6 +39,7 @@ public class ProxmoxClient {
     private static final String EXITSTATUS_FIELD = "exitstatus";
     private static final String ENDTIME_FIELD = "endtime";
     private static final String SSH_KEYS_FIELD = "sshkeys";
+    private static final String RESULT_FIELD = "result";
 
     private final ProxmoxServerConfig serverConfig;
     private final OkHttpClient httpClient;
@@ -895,11 +896,11 @@ public class ProxmoxClient {
         }
 
         JsonObject data = json.getAsJsonObject("data");
-        if (data == null || !data.has("result") || !data.get("result").isJsonArray()) {
+        if (data == null || !data.has(RESULT_FIELD) || !data.get(RESULT_FIELD).isJsonArray()) {
             return null;
         }
 
-        com.google.gson.JsonArray interfaces = data.getAsJsonArray("result");
+        com.google.gson.JsonArray interfaces = data.getAsJsonArray(RESULT_FIELD);
         for (com.google.gson.JsonElement elem : interfaces) {
             String ip = extractInterfaceIpv4(elem);
             if (ip != null) {
