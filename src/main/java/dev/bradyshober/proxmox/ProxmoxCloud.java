@@ -304,7 +304,8 @@ public class ProxmoxCloud extends Cloud {
             }
         }
 
-        LOGGER.log(Level.FINE, "Label '" + labelName + "' not in configured labels: " + configuredLabels);
+        LOGGER.log(
+                Level.FINE, "Label ''{0}'' not in configured labels: {1}", new Object[] {labelName, configuredLabels});
         return false;
     }
 
@@ -314,7 +315,9 @@ public class ProxmoxCloud extends Cloud {
      */
     @Override
     public Collection<NodeProvisioner.PlannedNode> provision(Label label, int excessWorkload) {
-        LOGGER.log(Level.FINE, "Provisioning requested for label: " + label + ", excessWorkload: " + excessWorkload);
+        LOGGER.log(Level.FINE, "Provisioning requested for label: {0}, excessWorkload: {1}", new Object[] {
+            label, excessWorkload
+        });
 
         List<NodeProvisioner.PlannedNode> plannedNodes = new ArrayList<>();
 
@@ -334,7 +337,7 @@ public class ProxmoxCloud extends Cloud {
             int availableCapacity = maxInstances - currentCount;
 
             if (availableCapacity <= 0) {
-                LOGGER.log(Level.INFO, "Instance capacity reached: " + currentCount + "/" + maxInstances);
+                LOGGER.log(Level.INFO, "Instance capacity reached: {0}/{1}", new Object[] {currentCount, maxInstances});
                 return plannedNodes;
             }
 
@@ -351,7 +354,7 @@ public class ProxmoxCloud extends Cloud {
                 // Generate unique agent name
                 String agentName = generateAgentName();
 
-                LOGGER.log(Level.INFO, "Planning Proxmox agent provisioning for " + agentName);
+                LOGGER.log(Level.INFO, "Planning Proxmox agent provisioning for {0}", agentName);
 
                 // Create cloud-init script for agent bootstrap
                 String cloudInitScript = generateCloudInitScript(agentName);
@@ -363,7 +366,7 @@ public class ProxmoxCloud extends Cloud {
                             try {
                                 return provisionAgent(agentName, cloudInitScript);
                             } catch (Exception e) {
-                                LOGGER.log(Level.SEVERE, "Failed to provision agent: " + agentName, e);
+                                LOGGER.log(Level.SEVERE, e, () -> "Failed to provision agent: " + agentName);
                                 return null;
                             }
                         }),
@@ -389,7 +392,7 @@ public class ProxmoxCloud extends Cloud {
      * guest agent, then the node is created with a launcher obtained from the configured connector.
      */
     private Node provisionAgent(String agentName, String cloudInitScript) throws Exception {
-        LOGGER.log(Level.INFO, "Starting provisioning of agent: " + agentName);
+        LOGGER.log(Level.INFO, "Starting provisioning of agent: {0}", agentName);
 
         ComputerConnector configuredConnector = agentTemplate.getComputerConnector();
         boolean inboundConnector = isInboundConnector(configuredConnector);
@@ -399,7 +402,7 @@ public class ProxmoxCloud extends Cloud {
         String jnlpSecret = null;
         if (inboundConnector) {
             jnlpSecret = JnlpSlaveAgentProtocol.SLAVE_SECRET.mac(agentName);
-            LOGGER.log(Level.FINE, "Computed inbound agent secret for " + agentName);
+            LOGGER.log(Level.FINE, "Computed inbound agent secret for {0}", agentName);
         }
 
         // -----------------------------------------------------------------------
@@ -422,7 +425,7 @@ public class ProxmoxCloud extends Cloud {
             if (inboundConnector) {
                 preRegisteredNode = buildDumbSlave(agentName, vmId, null);
                 Jenkins.get().addNode(preRegisteredNode);
-                LOGGER.log(Level.INFO, "Pre-registered Jenkins node for inbound agent: " + agentName);
+                LOGGER.log(Level.INFO, "Pre-registered Jenkins node for inbound agent: {0}", agentName);
             }
 
             // Track this instance
@@ -445,18 +448,18 @@ public class ProxmoxCloud extends Cloud {
             } catch (Exception e) {
                 LOGGER.log(
                         Level.WARNING,
-                        "Could not configure cloud-init params for VM " + vmId + "; continuing anyway. Error: "
-                                + e.getMessage());
+                        "Could not configure cloud-init params for VM {0}; continuing anyway. Error: {1}",
+                        new Object[] {vmId, e.getMessage()});
             }
 
             // Start the VM
             String upidStart = proxmoxClient.startVm(vmId);
-            LOGGER.log(Level.FINE, "Start task initiated for VM " + vmId + ": " + upidStart);
+            LOGGER.log(Level.FINE, "Start task initiated for VM {0}: {1}", new Object[] {vmId, upidStart});
 
             // Wait for VM to start
             waitForTaskCompletion("start", vmId, upidStart);
             instance.setState(ProxmoxInstance.InstanceState.RUNNING);
-            LOGGER.log(Level.INFO, "VM provisioned and started: " + agentName);
+            LOGGER.log(Level.INFO, "VM provisioned and started: {0}", agentName);
 
             // -----------------------------------------------------------------------
             // WebSocket / JNLP inbound: write the agent service file with the JNLP
@@ -465,14 +468,14 @@ public class ProxmoxCloud extends Cloud {
             // -----------------------------------------------------------------------
             if (inboundConnector && jnlpSecret != null) {
                 String serviceContent = buildJenkinsAgentServiceContent(agentName, jnlpSecret);
-                LOGGER.log(Level.FINE, "Waiting for QEMU guest agent on VM " + vmId);
+                LOGGER.log(Level.FINE, "Waiting for QEMU guest agent on VM {0}", vmId);
                 proxmoxClient.waitForGuestAgent(vmId);
 
                 // Download agent.jar from Jenkins before writing the service file.
                 downloadAgentJar(proxmoxClient, vmId);
 
                 proxmoxClient.writeFileViaGuestAgent(vmId, "/etc/systemd/system/jenkins-agent.service", serviceContent);
-                LOGGER.log(Level.FINE, "Wrote jenkins-agent.service to VM " + vmId + " via guest agent");
+                LOGGER.log(Level.FINE, "Wrote jenkins-agent.service to VM {0} via guest agent", vmId);
 
                 // Validate unit syntax early so provisioning logs include the parse error.
                 proxmoxClient.execCommandViaGuestAgent(
@@ -480,8 +483,7 @@ public class ProxmoxCloud extends Cloud {
                 proxmoxClient.execCommandViaGuestAgent(vmId, SYSTEMCTL_CMD, "daemon-reload");
                 proxmoxClient.execCommandViaGuestAgent(vmId, SYSTEMCTL_CMD, "enable", "--now", "jenkins-agent.service");
                 proxmoxClient.execCommandViaGuestAgent(vmId, SYSTEMCTL_CMD, "is-active", "jenkins-agent.service");
-                LOGGER.log(
-                        Level.INFO, "Started jenkins-agent.service on VM " + vmId + "; waiting for inbound connection");
+                LOGGER.log(Level.INFO, "Started jenkins-agent.service on VM {0}; waiting for inbound connection", vmId);
                 return preRegisteredNode;
             }
 
@@ -489,17 +491,17 @@ public class ProxmoxCloud extends Cloud {
             // SSH/other outbound mode: resolve IP via QEMU guest agent, then create the
             // launcher using the connector, and return the node.
             // -----------------------------------------------------------------------
-            LOGGER.log(Level.FINE, "Resolving IP address for VM " + vmId + " via QEMU guest agent");
+            LOGGER.log(Level.FINE, "Resolving IP address for VM {0} via QEMU guest agent", vmId);
             String ipAddress = null;
             try {
                 ipAddress = proxmoxClient.getVmIpAddress(vmId);
                 instance.setIpAddress(ipAddress);
-                LOGGER.log(Level.INFO, "Resolved VM " + vmId + " IP address: " + ipAddress);
+                LOGGER.log(Level.INFO, "Resolved VM {0} IP address: {1}", new Object[] {vmId, ipAddress});
             } catch (Exception e) {
                 LOGGER.log(
                         Level.WARNING,
-                        "Could not resolve VM IP address via guest agent; "
-                                + "the connector may not be able to connect. Error: " + e.getMessage());
+                        "Could not resolve VM IP address via guest agent; the connector may not be able to connect. Error: {0}",
+                        e.getMessage());
             }
 
             return buildDumbSlave(agentName, vmId, ipAddress);
@@ -525,7 +527,7 @@ public class ProxmoxCloud extends Cloud {
                 phase, vmId, attempt + 1, maxAttempts, upid
             });
             if (proxmoxClient.isTaskComplete(upid)) {
-                LOGGER.log(Level.FINE, "Proxmox " + phase + " task completed for VM " + vmId + ": " + upid);
+                LOGGER.log(Level.FINE, "Proxmox {0} task completed for VM {1}: {2}", new Object[] {phase, vmId, upid});
                 return;
             }
             Thread.sleep(5000); // Wait 5 seconds before checking again
@@ -809,7 +811,7 @@ public class ProxmoxCloud extends Cloud {
         String destPath = "/home/jenkins/agent.jar";
         String destDir = "/home/jenkins";
 
-        LOGGER.log(Level.FINE, "Downloading agent.jar from " + agentJarUrl + " onto VM " + vmId);
+        LOGGER.log(Level.FINE, "Downloading agent.jar from {0} onto VM {1}", new Object[] {agentJarUrl, vmId});
 
         // Ensure destination path exists before download attempts.
         // client.execCommandViaGuestAgent(vmId, "mkdir", "-p", destDir);
@@ -858,17 +860,15 @@ public class ProxmoxCloud extends Cloud {
         for (int attempt = 1; attempt <= maxAttempts; attempt++) {
             try {
                 client.execCommandViaGuestAgent(vmId, commandAndArgs);
-                LOGGER.log(
-                        Level.FINE,
-                        "agent.jar download succeeded on VM " + vmId + " using " + commandAndArgs[0] + " (attempt "
-                                + attempt + ")");
+                LOGGER.log(Level.FINE, "agent.jar download succeeded on VM {0} using {1} (attempt {2})", new Object[] {
+                    vmId, commandAndArgs[0], attempt
+                });
                 return true;
             } catch (Exception e) {
                 LOGGER.log(
                         Level.FINE,
-                        "agent.jar download attempt " + attempt + "/" + maxAttempts + " failed on VM " + vmId
-                                + " using " + commandAndArgs[0] + " to fetch " + url + " -> " + destPath
-                                + ": " + e.getMessage());
+                        "agent.jar download attempt {0}/{1} failed on VM {2} using {3} to fetch {4} -> {5}: {6}",
+                        new Object[] {attempt, maxAttempts, vmId, commandAndArgs[0], url, destPath, e.getMessage()});
                 if (attempt < maxAttempts) {
                     try {
                         Thread.sleep(5000);
@@ -884,9 +884,9 @@ public class ProxmoxCloud extends Cloud {
 
     private String buildJenkinsAgentServiceContent(String agentName, String jnlpSecret) {
         Jenkins jenkins = Jenkins.getInstanceOrNull();
-        String jenkinsUrl = jenkins != null ? jenkins.getRootUrl() : "http://jenkins:8080/";
+        String jenkinsUrl = jenkins != null ? jenkins.getRootUrl() : DEFAULT_JENKINS_URL;
         if (jenkinsUrl == null || jenkinsUrl.isBlank()) {
-            jenkinsUrl = "http://jenkins:8080/";
+            jenkinsUrl = DEFAULT_JENKINS_URL;
         }
         if (!jenkinsUrl.endsWith("/")) {
             jenkinsUrl += "/";
@@ -964,8 +964,8 @@ public class ProxmoxCloud extends Cloud {
         } catch (Exception e) {
             LOGGER.log(
                     Level.SEVERE,
-                    "Cannot initialise Proxmox client for minimum-floor reconciliation on cloud '" + name + "'",
-                    e);
+                    e,
+                    () -> "Cannot initialise Proxmox client for minimum-floor reconciliation on cloud '" + name + "'");
             return;
         }
 
@@ -985,8 +985,9 @@ public class ProxmoxCloud extends Cloud {
                 } catch (Exception e) {
                     LOGGER.log(
                             Level.SEVERE,
-                            "Failed to provision minimum-floor agent '" + agentName + "' for cloud '" + name + "'",
-                            e);
+                            e,
+                            () -> "Failed to provision minimum-floor agent '" + agentName + "' for cloud '" + name
+                                    + "'");
                 } finally {
                     getPendingProvisions().decrementAndGet();
                 }
@@ -1002,7 +1003,7 @@ public class ProxmoxCloud extends Cloud {
      * @param vmId Proxmox VM ID to terminate
      */
     public void terminateInstance(String vmId) {
-        LOGGER.log(Level.INFO, "Terminating Proxmox VM: " + vmId);
+        LOGGER.log(Level.INFO, "Terminating Proxmox VM: {0}", vmId);
         try {
             if (proxmoxClient == null) {
                 initializeClient();
@@ -1011,16 +1012,17 @@ public class ProxmoxCloud extends Cloud {
             try {
                 String upid = proxmoxClient.stopVm(vmId);
                 waitForTaskCompletion(upid);
-                LOGGER.log(Level.INFO, "VM " + vmId + " stopped");
+                LOGGER.log(Level.INFO, "VM {0} stopped", vmId);
             } catch (Exception e) {
-                LOGGER.log(Level.WARNING, "Could not gracefully stop VM " + vmId + "; attempting delete anyway", e);
+                LOGGER.log(
+                        Level.WARNING, e, () -> "Could not gracefully stop VM " + vmId + "; attempting delete anyway");
             }
             // Delete the VM
             proxmoxClient.deleteVm(vmId);
             instances.removeIf(i -> vmId.equals(i.getVmId()));
-            LOGGER.log(Level.INFO, "VM " + vmId + " deleted and removed from instance list");
+            LOGGER.log(Level.INFO, "VM {0} deleted and removed from instance list", vmId);
         } catch (Exception e) {
-            LOGGER.log(Level.SEVERE, "Error terminating VM " + vmId, e);
+            LOGGER.log(Level.SEVERE, e, () -> "Error terminating VM " + vmId);
         }
     }
 

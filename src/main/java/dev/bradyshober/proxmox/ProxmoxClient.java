@@ -38,6 +38,7 @@ public class ProxmoxClient {
     private static final String STATUS_FIELD = "status";
     private static final String EXITSTATUS_FIELD = "exitstatus";
     private static final String ENDTIME_FIELD = "endtime";
+    private static final String SSH_KEYS_FIELD = "sshkeys";
 
     private final ProxmoxServerConfig serverConfig;
     private final OkHttpClient httpClient;
@@ -297,13 +298,14 @@ public class ProxmoxClient {
                     .build();
             try (Response response = httpClient.newCall(request).execute()) {
                 if (response.isSuccessful()) {
-                    LOGGER.log(Level.FINE, "QEMU guest agent is ready for VM " + vmId);
+                    LOGGER.log(Level.FINE, "QEMU guest agent is ready for VM {0}", vmId);
                     return;
                 }
             } catch (IOException e) {
-                LOGGER.log(Level.FINE, "Guest agent ping attempt " + (attempt + 1) + ": " + e.getMessage());
+                LOGGER.log(Level.FINE, "Guest agent ping attempt {0}: {1}", new Object[] {attempt + 1, e.getMessage()});
             }
-            LOGGER.log(Level.FINE, "Waiting for guest agent (attempt " + (attempt + 1) + "/" + maxAttempts + ")");
+            LOGGER.log(
+                    Level.FINE, "Waiting for guest agent (attempt {0}/{1})", new Object[] {attempt + 1, maxAttempts});
             Thread.sleep(5000);
         }
         throw new Exception("QEMU guest agent not available for VM " + vmId + " within timeout");
@@ -326,20 +328,21 @@ public class ProxmoxClient {
         // Some Proxmox/QGA combinations accept plain text directly.
         try {
             writeGuestAgentFile(path, filePath, content, false);
-            LOGGER.log(Level.FINE, "Wrote " + filePath + " to VM " + vmId + " via guest agent (plain)");
+            LOGGER.log(Level.FINE, "Wrote {0} to VM {1} via guest agent (plain)", new Object[] {filePath, vmId});
             return;
         } catch (IOException e) {
             firstError = e;
             LOGGER.log(
                     Level.FINE,
-                    "Plain guest-agent file-write failed, retrying with base64 encoding: " + e.getMessage());
+                    "Plain guest-agent file-write failed, retrying with base64 encoding: {0}",
+                    e.getMessage());
         }
 
         // Fallback for environments that require encoded payloads.
         String encoded = Base64.getEncoder().encodeToString(content.getBytes(StandardCharsets.UTF_8));
         try {
             writeGuestAgentFile(path, filePath, encoded, true);
-            LOGGER.log(Level.FINE, "Wrote " + filePath + " to VM " + vmId + " via guest agent (base64)");
+            LOGGER.log(Level.FINE, "Wrote {0} to VM {1} via guest agent (base64)", new Object[] {filePath, vmId});
             return;
         } catch (IOException secondError) {
             throw new IOException(
@@ -427,9 +430,10 @@ public class ProxmoxClient {
 
                             String stdErr = decodeExecDataField(data, "err-data");
                             if (!stdErr.isBlank()) {
-                                LOGGER.log(Level.FINE, "Guest-agent stderr for '" + cmd + "': " + stdErr);
+                                LOGGER.log(
+                                        Level.FINE, "Guest-agent stderr for ''{0}'': {1}", new Object[] {cmd, stdErr});
                             }
-                            LOGGER.log(Level.FINE, "Guest-agent command OK: " + cmd);
+                            LOGGER.log(Level.FINE, "Guest-agent command OK: {0}", cmd);
                             return;
                         }
                     }
@@ -437,7 +441,7 @@ public class ProxmoxClient {
             }
             Thread.sleep(2000);
         }
-        LOGGER.log(Level.WARNING, "Guest-agent command timed out: " + String.join(" ", commandAndArgs));
+        LOGGER.log(Level.WARNING, () -> "Guest-agent command timed out: " + String.join(" ", commandAndArgs));
         throw new IOException("Guest-agent command timed out: " + String.join(" ", commandAndArgs));
     }
 
@@ -512,7 +516,8 @@ public class ProxmoxClient {
         try (Response response = httpClient.newCall(request).execute()) {
             return response.isSuccessful();
         } catch (IOException e) {
-            LOGGER.log(Level.FINE, "guest-agent ping probe failed for VM " + vmId + ": " + e.getMessage());
+            LOGGER.log(
+                    Level.FINE, "guest-agent ping probe failed for VM {0}: {1}", new Object[] {vmId, e.getMessage()});
             return false;
         }
     }
@@ -758,13 +763,15 @@ public class ProxmoxClient {
                 .addHeader(AUTHORIZATION_HEADER, authToken)
                 .build();
 
-        LOGGER.log(Level.FINE, "POST request to: " + path);
+        LOGGER.log(Level.FINE, "POST request to: {0}", path);
 
         try (Response response = httpClient.newCall(request).execute()) {
             if (!response.isSuccessful()) {
                 okhttp3.ResponseBody errorBody = response.body();
                 String errorMessage = errorBody != null ? errorBody.string() : "";
-                LOGGER.log(Level.WARNING, "API request failed with HTTP " + response.code() + ": " + errorMessage);
+                LOGGER.log(Level.WARNING, "API request failed with HTTP {0}: {1}", new Object[] {
+                    response.code(), errorMessage
+                });
                 if (response.code() == 401) {
                     LOGGER.log(
                             Level.WARNING,
@@ -818,15 +825,18 @@ public class ProxmoxClient {
                     JsonObject json = gson.fromJson(responseBody, JsonObject.class);
                     String ip = extractFirstIpv4(json);
                     if (ip != null) {
-                        LOGGER.log(Level.FINE, "VM " + vmId + " IP address resolved: " + ip);
+                        LOGGER.log(Level.FINE, "VM {0} IP address resolved: {1}", new Object[] {vmId, ip});
                         return ip;
                     }
                 }
             } catch (IOException e) {
-                LOGGER.log(Level.FINE, "Guest agent not ready (attempt " + (attempt + 1) + "): " + e.getMessage());
+                LOGGER.log(Level.FINE, "Guest agent not ready (attempt {0}): {1}", new Object[] {
+                    attempt + 1, e.getMessage()
+                });
             }
 
-            LOGGER.log(Level.FINE, "Waiting for VM IP address (attempt " + (attempt + 1) + "/" + maxAttempts + ")");
+            LOGGER.log(
+                    Level.FINE, "Waiting for VM IP address (attempt {0}/{1})", new Object[] {attempt + 1, maxAttempts});
             Thread.sleep(5000);
         }
 
@@ -908,10 +918,10 @@ public class ProxmoxClient {
             }
         }
         if (taskUpid != null && !taskUpid.isBlank()) {
-            LOGGER.log(Level.FINE, "Waiting for cloud-init config task " + taskUpid + " on VM " + vmId);
+            LOGGER.log(Level.FINE, "Waiting for cloud-init config task {0} on VM {1}", new Object[] {taskUpid, vmId});
             waitForTask(taskUpid);
         }
-        LOGGER.log(Level.FINE, "Configured VM params (ciuser, sshkeys, ipconfig0, tags) for VM " + vmId);
+        LOGGER.log(Level.FINE, "Configured VM params (ciuser, sshkeys, ipconfig0, tags) for VM {0}", vmId);
     }
 
     private RequestBody buildCloudInitRequestBody(
@@ -924,9 +934,9 @@ public class ProxmoxClient {
         if (normalizedSshKey != null && !normalizedSshKey.isBlank()) {
             if (doubleEncodeSshKeys) {
                 String onceEncoded = encodeFormComponent(normalizedSshKey);
-                appendFormField(form, "sshkeys", onceEncoded);
+                appendFormField(form, SSH_KEYS_FIELD, onceEncoded);
             } else {
-                appendFormField(form, "sshkeys", normalizedSshKey);
+                appendFormField(form, SSH_KEYS_FIELD, normalizedSshKey);
             }
         }
 
@@ -944,14 +954,14 @@ public class ProxmoxClient {
             return false;
         }
         String message = error.getMessage();
-        return message.contains("sshkeys") && message.contains("invalid urlencoded string");
+        return message.contains(SSH_KEYS_FIELD) && message.contains("invalid urlencoded string");
     }
 
     private static void appendFormField(StringBuilder form, String key, String value) {
         if (value == null) {
             return;
         }
-        if (form.length() > 0) {
+        if (!form.isEmpty()) {
             form.append('&');
         }
         form.append(encodeFormComponent(key)).append('=').append(encodeFormComponent(value));

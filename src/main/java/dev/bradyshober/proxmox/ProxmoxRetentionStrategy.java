@@ -131,8 +131,8 @@ public class ProxmoxRetentionStrategy extends RetentionStrategy<SlaveComputer> {
             computer.setTemporarilyOffline(true, new OfflineCause.ByCLI(offlineReason));
             LOGGER.log(
                     Level.INFO,
-                    AGENT_PREFIX + computer.getName() + " exceeded max lifetime of " + effectiveMaxLifetimeMinutes
-                            + " min; marked temporarily offline for drain");
+                    "{0}{1} exceeded max lifetime of {2} min; marked temporarily offline for drain",
+                    new Object[] {AGENT_PREFIX, computer.getName(), effectiveMaxLifetimeMinutes});
         }
 
         boolean maxBuildsExceeded = false;
@@ -157,8 +157,8 @@ public class ProxmoxRetentionStrategy extends RetentionStrategy<SlaveComputer> {
             computer.setTemporarilyOffline(true, new OfflineCause.ByCLI(offlineReason));
             LOGGER.log(
                     Level.INFO,
-                    AGENT_PREFIX + computer.getName() + " reached max build count of " + effectiveMaxBuilds
-                            + "; marked temporarily offline for drain");
+                    "{0}{1} reached max build count of {2}; marked temporarily offline for drain",
+                    new Object[] {AGENT_PREFIX, computer.getName(), effectiveMaxBuilds});
         }
 
         if (!computer.isIdle()) {
@@ -177,7 +177,7 @@ public class ProxmoxRetentionStrategy extends RetentionStrategy<SlaveComputer> {
             }
 
             if (proxmoxCloud == null) {
-                LOGGER.log(Level.WARNING, "Could not find ProxmoxCloud '" + configuredCloudName + "' for VM cleanup");
+                LOGGER.log(Level.WARNING, "Could not find ProxmoxCloud ''{0}'' for VM cleanup", configuredCloudName);
                 return 1;
             }
 
@@ -185,8 +185,8 @@ public class ProxmoxRetentionStrategy extends RetentionStrategy<SlaveComputer> {
             if (!proxmoxCloud.canTerminateVmForScaleDown(configuredVmId)) {
                 LOGGER.log(
                         Level.FINE,
-                        "Skipping idle termination for " + computer.getName()
-                                + " because cloud minimum instance floor is reached");
+                        "Skipping idle termination for {0} because cloud minimum instance floor is reached",
+                        computer.getName());
                 return 1;
             }
         }
@@ -199,26 +199,24 @@ public class ProxmoxRetentionStrategy extends RetentionStrategy<SlaveComputer> {
                 return 1; // Not idle long enough yet
             }
 
-            LOGGER.log(
-                    Level.INFO,
-                    AGENT_PREFIX + computer.getName() + " idle for " + idleMinutesElapsed + " min (threshold "
-                            + effectiveIdleMinutes + " min); terminating VM " + configuredVmId);
+            LOGGER.log(Level.INFO, "{0}{1} idle for {2} min (threshold {3} min); terminating VM {4}", new Object[] {
+                AGENT_PREFIX, computer.getName(), idleMinutesElapsed, effectiveIdleMinutes, configuredVmId
+            });
         } else if (maxBuildsExceeded) {
-            LOGGER.log(
-                    Level.INFO,
-                    AGENT_PREFIX + computer.getName() + " reached max build count and is now idle; terminating VM "
-                            + configuredVmId);
+            LOGGER.log(Level.INFO, "{0}{1} reached max build count and is now idle; terminating VM {2}", new Object[] {
+                AGENT_PREFIX, computer.getName(), configuredVmId
+            });
         } else {
             LOGGER.log(
                     Level.INFO,
-                    AGENT_PREFIX + computer.getName() + " reached max lifetime of " + effectiveMaxLifetimeMinutes
-                            + " min and is now idle; terminating VM " + configuredVmId);
+                    "{0}{1} reached max lifetime of {2} min and is now idle; terminating VM {3}",
+                    new Object[] {AGENT_PREFIX, computer.getName(), effectiveMaxLifetimeMinutes, configuredVmId});
         }
 
         try {
             computer.disconnect(null);
         } catch (Exception e) {
-            LOGGER.log(Level.WARNING, "Error disconnecting computer " + computer.getName(), e);
+            LOGGER.log(Level.WARNING, e, () -> "Error disconnecting computer " + computer.getName());
         }
 
         // Locate the cloud and trigger VM termination when provenance is known.
@@ -232,7 +230,7 @@ public class ProxmoxRetentionStrategy extends RetentionStrategy<SlaveComputer> {
                     jenkinsInstance.removeNode(node);
                 }
             } catch (IOException e) {
-                LOGGER.log(Level.WARNING, "Could not remove node " + computer.getName() + " from Jenkins", e);
+                LOGGER.log(Level.WARNING, e, () -> "Could not remove node " + computer.getName() + " from Jenkins");
             }
         }
 
@@ -244,7 +242,7 @@ public class ProxmoxRetentionStrategy extends RetentionStrategy<SlaveComputer> {
         computer.connect(false);
     }
 
-    public void taskAccepted(Executor executor, Queue.Task task) {
+    public void taskAccepted(Executor executor) {
         if (!(executor.getOwner() instanceof SlaveComputer computer)) {
             return;
         }
@@ -278,19 +276,53 @@ public class ProxmoxRetentionStrategy extends RetentionStrategy<SlaveComputer> {
             }
             LOGGER.log(
                     Level.INFO,
-                    AGENT_PREFIX + computer.getName() + " accepted its final allowed build (max=" + configuredMaxBuilds
-                            + "); disabled for further scheduling");
+                    "{0}{1} accepted its final allowed build (max={2}); disabled for further scheduling",
+                    new Object[] {AGENT_PREFIX, computer.getName(), configuredMaxBuilds});
         } else {
-            LOGGER.log(Level.FINE, AGENT_PREFIX + computer.getName() + " has " + remaining + " builds remaining");
+            LOGGER.log(Level.FINE, "{0}{1} has {2} builds remaining", new Object[] {
+                AGENT_PREFIX, computer.getName(), remaining
+            });
         }
     }
 
-    public void taskCompleted(Executor executor, Queue.Task task, long durationMS) {
+    // Backward-compatible overload used by tests and any direct callers.
+    public void taskAccepted(Executor executor, Queue.Task task) {
+        if (LOGGER.isLoggable(Level.FINEST)) {
+            LOGGER.log(
+                    Level.FINEST,
+                    "taskAccepted bridge invoked for task {0}",
+                    task != null ? task.getDisplayName() : "<null>");
+        }
+        taskAccepted(executor);
+    }
+
+    public void taskCompleted(Executor executor) {
         maybeTriggerDrainTermination(executor);
     }
 
-    public void taskCompletedWithProblems(Executor executor, Queue.Task task, long durationMS, Throwable problems) {
+    // Backward-compatible overload used by tests and any direct callers.
+    public void taskCompleted(Executor executor, Queue.Task task, long durationMS) {
+        if (LOGGER.isLoggable(Level.FINEST)) {
+            LOGGER.log(Level.FINEST, "taskCompleted bridge invoked for task {0} (durationMs={1})", new Object[] {
+                task != null ? task.getDisplayName() : "<null>", durationMS
+            });
+        }
+        taskCompleted(executor);
+    }
+
+    public void taskCompletedWithProblems(Executor executor) {
         maybeTriggerDrainTermination(executor);
+    }
+
+    // Backward-compatible overload used by tests and any direct callers.
+    public void taskCompletedWithProblems(Executor executor, Queue.Task task, long durationMS, Throwable problems) {
+        if (LOGGER.isLoggable(Level.FINEST)) {
+            LOGGER.log(
+                    Level.FINEST,
+                    "taskCompletedWithProblems bridge invoked for task {0} (durationMs={1}, hasProblems={2})",
+                    new Object[] {task != null ? task.getDisplayName() : "<null>", durationMS, problems != null});
+        }
+        taskCompletedWithProblems(executor);
     }
 
     private void maybeTriggerDrainTermination(Executor executor) {
@@ -326,18 +358,17 @@ public class ProxmoxRetentionStrategy extends RetentionStrategy<SlaveComputer> {
     public static class BuildEventBridge implements ExecutorListener {
         @Override
         public void taskAccepted(Executor executor, Queue.Task task) {
-            withStrategy(executor, strategy -> strategy.taskAccepted(executor, task));
+            withStrategy(executor, strategy -> strategy.taskAccepted(executor));
         }
 
         @Override
         public void taskCompleted(Executor executor, Queue.Task task, long durationMS) {
-            withStrategy(executor, strategy -> strategy.taskCompleted(executor, task, durationMS));
+            withStrategy(executor, strategy -> strategy.taskCompleted(executor));
         }
 
         @Override
         public void taskCompletedWithProblems(Executor executor, Queue.Task task, long durationMS, Throwable problems) {
-            withStrategy(
-                    executor, strategy -> strategy.taskCompletedWithProblems(executor, task, durationMS, problems));
+            withStrategy(executor, strategy -> strategy.taskCompletedWithProblems(executor));
         }
 
         private static void withStrategy(
