@@ -154,6 +154,58 @@ public class ProxmoxCloudTest {
     }
 
     @Test
+    public void testBuildProvisioningTagsTrimsLeadingAndTrailingHyphens() {
+        ProxmoxJNLPConnector connector = new ProxmoxJNLPConnector();
+        connector.setWebSocket(true);
+
+        ProxmoxCloud namedCloud = new ProxmoxCloud(
+                "---Prod Cloud---",
+                "https://proxmox.example.com:8006",
+                "proxmox-api-token",
+                false,
+                "pve",
+                "100",
+                "proxmox-agent",
+                0,
+                5,
+                5,
+                connector,
+                "jenkins",
+                null,
+                "proxmox",
+                "/home/jenkins",
+                1);
+
+        assertEquals("jenkins-proxmox-plugin;jenkins-cloud-prod-cloud", namedCloud.buildProvisioningTags());
+    }
+
+    @Test
+    public void testBuildProvisioningTagsUsesDefaultCloudTagWhenSanitizedNameIsBlank() {
+        ProxmoxJNLPConnector connector = new ProxmoxJNLPConnector();
+        connector.setWebSocket(true);
+
+        ProxmoxCloud namedCloud = new ProxmoxCloud(
+                "!!!",
+                "https://proxmox.example.com:8006",
+                "proxmox-api-token",
+                false,
+                "pve",
+                "100",
+                "proxmox-agent",
+                0,
+                5,
+                5,
+                connector,
+                "jenkins",
+                null,
+                "proxmox",
+                "/home/jenkins",
+                1);
+
+        assertEquals("jenkins-proxmox-plugin;jenkins-cloud-default", namedCloud.buildProvisioningTags());
+    }
+
+    @Test
     public void testHasTagMatchesSemicolonDelimitedTags() {
         assertTrue(ProxmoxCloud.hasTag("a;b;c", "b"));
         assertFalse(ProxmoxCloud.hasTag("a;b;c", "x"));

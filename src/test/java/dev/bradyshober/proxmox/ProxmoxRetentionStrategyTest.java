@@ -2,13 +2,38 @@ package dev.bradyshober.proxmox;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import hudson.model.Node;
+import hudson.slaves.JNLPLauncher;
+import hudson.slaves.SlaveComputer;
+import java.lang.reflect.Field;
 import org.junit.jupiter.api.Test;
+import org.jvnet.hudson.test.JenkinsRule;
+import org.jvnet.hudson.test.junit.jupiter.WithJenkins;
 
 /**
  * Unit tests for {@link ProxmoxRetentionStrategy}.
  * Constructor and getter tests do not require a Jenkins context.
  */
 class ProxmoxRetentionStrategyTest {
+
+    private ProxmoxNode createNode(String nodeName, ProxmoxRetentionStrategy strategy) throws Exception {
+        return new ProxmoxNode(
+                nodeName,
+                "test node",
+                "/home/jenkins",
+                1,
+                Node.Mode.NORMAL,
+                "proxmox",
+                new JNLPLauncher(),
+                strategy,
+                strategy.getMaxBuildsPerAgent());
+    }
+
+    private void setCreatedAtMillis(ProxmoxRetentionStrategy strategy, long value) throws Exception {
+        Field field = ProxmoxRetentionStrategy.class.getDeclaredField("createdAtMillis");
+        field.setAccessible(true);
+        field.setLong(strategy, value);
+    }
 
     @Test
     void testDefaultConstructorUsesDefaultValues() {
@@ -137,5 +162,75 @@ class ProxmoxRetentionStrategyTest {
         assertEquals(0, ProxmoxRetentionStrategy.DEFAULT_MAX_LIFETIME_MINUTES);
         assertTrue(ProxmoxRetentionStrategy.MAX_LIFETIME_DRAIN_REASON_PREFIX.contains("lifetime"));
         assertTrue(ProxmoxRetentionStrategy.MAX_BUILDS_DRAIN_REASON_PREFIX.contains("build"));
+    }
+
+    @Test
+    @WithJenkins
+    void testCheckSkipsTerminationWhenCloudOrVmIdMissing(JenkinsRule j) throws Exception {
+        ProxmoxRetentionStrategy strategy = new ProxmoxRetentionStrategy(null, null, 5, 1, 0);
+        ProxmoxNode node = createNode("agent-missing-identity", strategy);
+        j.jenkins.addNode(node);
+
+        SlaveComputer computer = (SlaveComputer) node.toComputer();
+        assertNotNull(computer);
+
+        setCreatedAtMillis(strategy, System.currentTimeMillis() - (2L * 60L * 1000L));
+
+        long result = strategy.check(computer);
+
+        assertEquals(1L, result);
+        assertTrue(computer.isTemporarilyOffline(), "max-lifetime drain should mark computer offline");
+    }
+
+    @Test
+    @WithJenkins
+    void testCheckSkipsTerminationWhenCloudCannotBeResolved(JenkinsRule j) throws Exception {
+        ProxmoxRetentionStrategy strategy = new ProxmoxRetentionStrategy("missing-cloud", "vm-501", 5, 0, 0);
+        ProxmoxNode node = createNode("agent-missing-cloud", strategy);
+        j.jenkins.addNode(node);
+
+        SlaveComputer computer = (SlaveComputer) node.toComputer();
+        assertNotNull(computer);
+
+        long result = strategy.check(computer);
+
+        assertEquals(1L, result);
+    }
+
+    @Test
+    @WithJenkins
+    void testCheckDefersWhenComputerIsNotIdle(JenkinsRule j) throws Exception {
+        ProxmoxJNLPConnector connector = new ProxmoxJNLPConnector();
+        ProxmoxCloud cloud = new ProxmoxCloud(
+                "proxmox-retention",
+                "https://proxmox.example.com:8006",
+                "proxmox-api-token",
+                false,
+                "pve",
+                "100",
+                "agent",
+                0,
+                5,
+                1,
+                connector,
+                "jenkins",
+                null,
+                "proxmox",
+                "/home/jenkins",
+                1);
+        j.jenkins.clouds.add(cloud);
+
+        ProxmoxRetentionStrategy strategy = new ProxmoxRetentionStrategy("proxmox-retention", "vm-700", 1, 1, 0);
+        ProxmoxNode node = createNode("agent-idle-terminate", strategy);
+        j.jenkins.addNode(node);
+
+        SlaveComputer computer = (SlaveComputer) node.toComputer();
+        assertNotNull(computer);
+        setCreatedAtMillis(strategy, System.currentTimeMillis() - (2L * 60L * 1000L));
+
+        long result = strategy.check(computer);
+
+        assertEquals(1L, result);
+        assertNotNull(j.jenkins.getNode("agent-idle-terminate"));
     }
 }
