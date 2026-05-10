@@ -975,7 +975,8 @@ public class ProxmoxCloudTest {
 
     @Test
     public void testBuildJenkinsAgentServiceContentUsesDefaultJenkinsUrlOutsideJenkinsContext() throws Exception {
-        Method method = ProxmoxCloud.class.getDeclaredMethod("buildJenkinsAgentServiceContent", String.class, String.class);
+        Method method =
+                ProxmoxCloud.class.getDeclaredMethod("buildJenkinsAgentServiceContent", String.class, String.class);
         method.setAccessible(true);
 
         String content = (String) method.invoke(proxmoxCloud, "agent-service", "secret-token");
@@ -990,13 +991,15 @@ public class ProxmoxCloudTest {
     @Test
     @WithJenkins
     public void testDescriptorComputerConnectorDescriptorsAreFiltered(JenkinsRule jenkinsRule) {
-        ProxmoxCloud.DescriptorImpl descriptor = jenkinsRule.jenkins.getDescriptorByType(ProxmoxCloud.DescriptorImpl.class);
+        ProxmoxCloud.DescriptorImpl descriptor =
+                jenkinsRule.jenkins.getDescriptorByType(ProxmoxCloud.DescriptorImpl.class);
 
         java.util.List<Descriptor<ComputerConnector>> connectors = descriptor.getComputerConnectorDescriptors();
 
         assertFalse(connectors.isEmpty());
         assertTrue(connectors.stream()
-                .allMatch(d -> d.clazz == hudson.plugins.sshslaves.SSHConnector.class || d.clazz == ProxmoxJNLPConnector.class));
+                .allMatch(d -> d.clazz == hudson.plugins.sshslaves.SSHConnector.class
+                        || d.clazz == ProxmoxJNLPConnector.class));
         assertTrue(connectors.stream().anyMatch(d -> d.clazz == ProxmoxJNLPConnector.class));
     }
 

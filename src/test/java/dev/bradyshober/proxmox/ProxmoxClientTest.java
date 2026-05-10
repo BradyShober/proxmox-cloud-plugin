@@ -248,7 +248,8 @@ class ProxmoxClientTest {
         enqueueVersionOk();
 
         ProxmoxClient client = new ProxmoxClient(serverConfig(false));
-        IllegalArgumentException ex = assertThrows(IllegalArgumentException.class, () -> client.isTaskComplete("UPID:bad"));
+        IllegalArgumentException ex =
+                assertThrows(IllegalArgumentException.class, () -> client.isTaskComplete("UPID:bad"));
         assertTrue(ex.getMessage().contains("Invalid UPID format"));
     }
 
@@ -341,7 +342,8 @@ class ProxmoxClientTest {
         enqueueVersionOk();
 
         ProxmoxClient client = new ProxmoxClient(serverConfig(false));
-        IllegalArgumentException ex = assertThrows(IllegalArgumentException.class, () -> client.execCommandViaGuestAgent("900"));
+        IllegalArgumentException ex =
+                assertThrows(IllegalArgumentException.class, () -> client.execCommandViaGuestAgent("900"));
         assertTrue(ex.getMessage().contains("non-empty command"));
     }
 
