@@ -39,6 +39,7 @@ import jenkins.slaves.JnlpSlaveAgentProtocol;
 import org.kohsuke.stapler.DataBoundConstructor;
 import org.kohsuke.stapler.DataBoundSetter;
 import org.kohsuke.stapler.QueryParameter;
+import org.kohsuke.stapler.interceptor.RequirePOST;
 
 /**
  * Proxmox Cloud provider for dynamic agent provisioning.
@@ -1292,6 +1293,7 @@ public class ProxmoxCloud extends Cloud {
                     .includeCurrentValue(apiTokenCredentialId);
         }
 
+        @RequirePOST
         public FormValidation doCheckApiTokenCredentialId(@QueryParameter String value) {
             Jenkins jenkins = Jenkins.get();
             jenkins.checkPermission(Jenkins.ADMINISTER);
