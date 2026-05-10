@@ -241,4 +241,124 @@ class ProxmoxClientTest {
         assertTrue(body.contains("%2B"), "Base64 plus signs must be preserved as %2B: " + body);
         assertTrue(body.contains("brady%40jenkins"), "Comment should remain URL-encoded: " + body);
     }
+
+    @Test
+    void testIsTaskCompleteThrowsForInvalidUpidFormat(JenkinsRule j) throws Exception {
+        addCredential(j);
+        enqueueVersionOk();
+
+        ProxmoxClient client = new ProxmoxClient(serverConfig(false));
+        IllegalArgumentException ex = assertThrows(IllegalArgumentException.class, () -> client.isTaskComplete("UPID:bad"));
+        assertTrue(ex.getMessage().contains("Invalid UPID format"));
+    }
+
+    @Test
+    void testIsTaskCompleteRecognizesStoppedOkWithoutEndtime(JenkinsRule j) throws Exception {
+        addCredential(j);
+        enqueueVersionOk();
+        mockWebServer.enqueue(new MockResponse()
+                .setResponseCode(200)
+                .setBody("{\"data\":{\"status\":\"stopped\",\"exitstatus\":\"OK\"}}"));
+
+        ProxmoxClient client = new ProxmoxClient(serverConfig(false));
+        boolean complete = client.isTaskComplete("UPID:pve:0001:0002:0003:qmconfig:900:root@pam:");
+
+        assertTrue(complete);
+    }
+
+    @Test
+    void testIsTaskCompleteReturnsFalseWhenDataMissing(JenkinsRule j) throws Exception {
+        addCredential(j);
+        enqueueVersionOk();
+        mockWebServer.enqueue(new MockResponse().setResponseCode(200).setBody("{}"));
+
+        ProxmoxClient client = new ProxmoxClient(serverConfig(false));
+        boolean complete = client.isTaskComplete("UPID:pve:0001:0002:0003:qmconfig:900:root@pam:");
+
+        assertFalse(complete);
+    }
+
+    @Test
+    void testDeleteVmReturnsTaskUpid(JenkinsRule j) throws Exception {
+        addCredential(j);
+        enqueueVersionOk();
+        mockWebServer.enqueue(new MockResponse()
+                .setResponseCode(200)
+                .setBody("{\"data\":\"UPID:pve:0003:0003:0003:qmdelete:900:root@pam:\"}"));
+
+        ProxmoxClient client = new ProxmoxClient(serverConfig(false));
+        String upid = client.deleteVm("900");
+
+        assertTrue(upid.contains("qmdelete"));
+        mockWebServer.takeRequest();
+        RecordedRequest deleteRequest = mockWebServer.takeRequest();
+        assertEquals("DELETE", deleteRequest.getMethod());
+        assertEquals("/api2/json/nodes/pve/qemu/900", deleteRequest.getPath());
+    }
+
+    @Test
+    void testDeleteVmThrowsWhenResponseHasNoData(JenkinsRule j) throws Exception {
+        addCredential(j);
+        enqueueVersionOk();
+        mockWebServer.enqueue(new MockResponse().setResponseCode(200).setBody("{}"));
+
+        ProxmoxClient client = new ProxmoxClient(serverConfig(false));
+        assertThrows(Exception.class, () -> client.deleteVm("901"));
+    }
+
+    @Test
+    void testDeleteVmThrowsOnHttpError(JenkinsRule j) throws Exception {
+        addCredential(j);
+        enqueueVersionOk();
+        mockWebServer.enqueue(new MockResponse().setResponseCode(500).setBody("delete failed"));
+
+        ProxmoxClient client = new ProxmoxClient(serverConfig(false));
+        IOException ex = assertThrows(IOException.class, () -> client.deleteVm("902"));
+        assertTrue(ex.getMessage().contains("HTTP 500"));
+    }
+
+    @Test
+    void testListNodeVmsSkipsInvalidEntries(JenkinsRule j) throws Exception {
+        addCredential(j);
+        enqueueVersionOk();
+        mockWebServer.enqueue(new MockResponse()
+                .setResponseCode(200)
+                .setBody("{\"data\":[null,{},"
+                        + "{\"name\":\"missing-id\"},"
+                        + "{\"vmid\":300,\"name\":\"agent-300\",\"status\":\"running\"}] }"));
+
+        ProxmoxClient client = new ProxmoxClient(serverConfig(false));
+        java.util.List<ProxmoxClient.ProxmoxVmSummary> vms = client.listNodeVms();
+
+        assertEquals(1, vms.size());
+        assertEquals("300", vms.get(0).getVmId());
+        assertEquals("", vms.get(0).getTags());
+    }
+
+    @Test
+    void testExecCommandViaGuestAgentValidatesEmptyCommand(JenkinsRule j) throws Exception {
+        addCredential(j);
+        enqueueVersionOk();
+
+        ProxmoxClient client = new ProxmoxClient(serverConfig(false));
+        IllegalArgumentException ex = assertThrows(IllegalArgumentException.class, () -> client.execCommandViaGuestAgent("900"));
+        assertTrue(ex.getMessage().contains("non-empty command"));
+    }
+
+    @Test
+    void testNormalizeSshPublicKeyCompactsWhitespaceForUnknownType() {
+        String normalized = ProxmoxClient.normalizeSshPublicKey("custom-key   AAAA\n   BBBB\t comment");
+        assertEquals("custom-key AAAA BBBB comment", normalized);
+    }
+
+    @Test
+    void testNormalizeSshPublicKeyRepairsWrappedOpenSshKey() {
+        String normalized = ProxmoxClient.normalizeSshPublicKey("ssh-rsa AAAA BBBB CCCC user@host");
+        assertEquals("ssh-rsa AAAABBBBCCCC user@host", normalized);
+    }
+
+    @Test
+    void testNormalizeSshPublicKeyNullInput() {
+        assertEquals("", ProxmoxClient.normalizeSshPublicKey(null));
+    }
 }

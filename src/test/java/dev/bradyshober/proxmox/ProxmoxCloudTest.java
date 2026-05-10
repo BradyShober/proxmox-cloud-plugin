@@ -6,10 +6,12 @@ import com.cloudbees.plugins.credentials.CredentialsProvider;
 import com.cloudbees.plugins.credentials.CredentialsScope;
 import com.cloudbees.plugins.credentials.domains.Domain;
 import com.google.gson.JsonObject;
+import hudson.model.Descriptor;
 import hudson.model.Executor;
 import hudson.model.Label;
 import hudson.model.Node;
 import hudson.model.labels.LabelAtom;
+import hudson.slaves.ComputerConnector;
 import hudson.slaves.ComputerLauncher;
 import hudson.slaves.JNLPLauncher;
 import hudson.slaves.OfflineCause;
@@ -884,6 +886,118 @@ public class ProxmoxCloudTest {
 
         // Count is unchanged.
         assertEquals(2, minCloud.countLiveCloudNodes());
+    }
+
+    @Test
+    public void testConstructorUsesDefaultInboundConnectorWhenConnectorIsNull() {
+        ProxmoxCloud cloudWithDefaultConnector = new ProxmoxCloud(
+                "DefaultConnectorCloud",
+                "https://proxmox.example.com:8006",
+                "proxmox-api-token",
+                false,
+                "pve",
+                "100",
+                "proxmox-agent",
+                0,
+                5,
+                5,
+                null,
+                "jenkins",
+                null,
+                "proxmox",
+                "/home/jenkins",
+                1);
+
+        assertInstanceOf(ProxmoxJNLPConnector.class, cloudWithDefaultConnector.getComputerConnector());
+        assertTrue(((ProxmoxJNLPConnector) cloudWithDefaultConnector.getComputerConnector()).isWebSocket());
+    }
+
+    @Test
+    public void testReserveVmIdAndStartCloneRejectsBlankVmId() {
+        IOException exception = assertThrows(
+                IOException.class,
+                () -> proxmoxCloud.reserveVmIdAndStartClone("agent-blank", () -> " ", vmId -> "upid-" + vmId));
+
+        assertTrue(exception.getMessage().contains("blank VM ID"));
+    }
+
+    @Test
+    public void testReserveVmIdAndStartCloneReleasesVmIdWhenCloneFails() throws Exception {
+        IOException firstFailure = assertThrows(
+                IOException.class,
+                () -> proxmoxCloud.reserveVmIdAndStartClone("agent-fail", () -> "610", vmId -> {
+                    throw new IOException("clone failed");
+                }));
+        assertTrue(firstFailure.getMessage().contains("clone failed"));
+
+        ProxmoxCloud.CloneReservation secondTry =
+                proxmoxCloud.reserveVmIdAndStartClone("agent-retry", () -> "610", vmId -> "upid-" + vmId);
+        assertEquals("610", secondTry.getVmId());
+
+        releaseReservedVmId(proxmoxCloud, secondTry.getVmId());
+    }
+
+    @Test
+    public void testReserveVmIdAndStartCloneTimesOutWhenVmIdStaysReserved() throws Exception {
+        ProxmoxCloud.CloneReservation heldReservation =
+                proxmoxCloud.reserveVmIdAndStartClone("agent-held", () -> "620", vmId -> "upid-" + vmId);
+        try {
+            IOException timeout = assertThrows(
+                    IOException.class,
+                    () -> proxmoxCloud.reserveVmIdAndStartClone("agent-timeout", () -> "620", vmId -> "upid-" + vmId));
+            assertTrue(timeout.getMessage().contains("Timed out waiting for a unique Proxmox VM ID"));
+        } finally {
+            releaseReservedVmId(proxmoxCloud, heldReservation.getVmId());
+        }
+    }
+
+    @Test
+    public void testHasTagRejectsNullAndBlankInputs() {
+        assertFalse(ProxmoxCloud.hasTag(null, "jenkins-proxmox-plugin"));
+        assertFalse(ProxmoxCloud.hasTag("", "jenkins-proxmox-plugin"));
+        assertFalse(ProxmoxCloud.hasTag("jenkins-proxmox-plugin", ""));
+        assertFalse(ProxmoxCloud.hasTag("jenkins-proxmox-plugin", null));
+    }
+
+    @Test
+    public void testGenerateCloudInitScriptUsesDefaultJenkinsUrlOutsideJenkinsContext() throws Exception {
+        Method method = ProxmoxCloud.class.getDeclaredMethod("generateCloudInitScript", String.class);
+        method.setAccessible(true);
+
+        String script = (String) method.invoke(proxmoxCloud, "agent-reflective");
+
+        assertTrue(script.contains("#cloud-config"));
+        assertTrue(script.contains("http://jenkins:8080/jnlpJars/agent.jar"));
+        assertTrue(script.contains("-name agent-reflective"));
+        assertTrue(script.contains("-secret %SECRET%"));
+        assertTrue(script.contains("systemctl enable --now jenkins-agent.service"));
+    }
+
+    @Test
+    public void testBuildJenkinsAgentServiceContentUsesDefaultJenkinsUrlOutsideJenkinsContext() throws Exception {
+        Method method = ProxmoxCloud.class.getDeclaredMethod("buildJenkinsAgentServiceContent", String.class, String.class);
+        method.setAccessible(true);
+
+        String content = (String) method.invoke(proxmoxCloud, "agent-service", "secret-token");
+
+        assertTrue(content.contains("ExecStart=java -jar /home/jenkins/agent.jar"));
+        assertTrue(content.contains("-url http://jenkins:8080/"));
+        assertTrue(content.contains("-name agent-service"));
+        assertTrue(content.contains("-secret secret-token"));
+        assertTrue(content.contains("WantedBy=multi-user.target"));
+    }
+
+    @Test
+    @WithJenkins
+    public void testDescriptorComputerConnectorDescriptorsAreFiltered(JenkinsRule jenkinsRule) {
+        ProxmoxCloud.DescriptorImpl descriptor = jenkinsRule.jenkins.getDescriptorByType(ProxmoxCloud.DescriptorImpl.class);
+
+        java.util.List<Descriptor<ComputerConnector>> connectors = descriptor.getComputerConnectorDescriptors();
+
+        assertFalse(connectors.isEmpty());
+        assertTrue(connectors.stream()
+                .allMatch(d -> d.clazz == hudson.plugins.sshslaves.SSHConnector.class || d.clazz == ProxmoxJNLPConnector.class));
+        assertTrue(connectors.stream().anyMatch(d -> d.clazz == ProxmoxJNLPConnector.class));
     }
 
     private void addSecretTextCredential(JenkinsRule jenkinsRule, String id, String secret) throws Exception {
