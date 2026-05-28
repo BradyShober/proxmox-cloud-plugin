@@ -1280,6 +1280,7 @@ public class ProxmoxCloud extends Cloud {
             return filtered;
         }
 
+        @RequirePOST
         public ListBoxModel doFillApiTokenCredentialIdItems(@QueryParameter String apiTokenCredentialId) {
             Jenkins jenkins = Jenkins.get();
             StandardListBoxModel options = new StandardListBoxModel();
