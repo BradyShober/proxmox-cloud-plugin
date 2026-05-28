@@ -386,7 +386,8 @@ class ProxmoxClientTest {
         mockWebServer.enqueue(new MockResponse().setResponseCode(596).setBody("temporary guest agent issue"));
         mockWebServer.enqueue(new MockResponse().setResponseCode(200).setBody("{\"data\":{\"result\":\"pong\"}}"));
         mockWebServer.enqueue(new MockResponse().setResponseCode(200).setBody("{\"data\":{\"pid\":42}}"));
-        mockWebServer.enqueue(new MockResponse().setResponseCode(200).setBody("{\"data\":{\"exited\":1,\"exitcode\":0}}"));
+        mockWebServer.enqueue(
+                new MockResponse().setResponseCode(200).setBody("{\"data\":{\"exited\":1,\"exitcode\":0}}"));
 
         ProxmoxClient client = new ProxmoxClient(serverConfig(false));
         assertDoesNotThrow(() -> client.execCommandViaGuestAgent("940", "systemctl", "daemon-reload"));
@@ -408,13 +409,15 @@ class ProxmoxClientTest {
         addCredential(j);
         enqueueVersionOk();
         mockWebServer.enqueue(new MockResponse().setResponseCode(200).setBody("{\"data\":{\"pid\":7}}"));
-        String stderr = java.util.Base64.getEncoder().encodeToString("permission denied".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        String stderr = java.util.Base64.getEncoder()
+                .encodeToString("permission denied".getBytes(java.nio.charset.StandardCharsets.UTF_8));
         mockWebServer.enqueue(new MockResponse()
                 .setResponseCode(200)
                 .setBody("{\"data\":{\"exited\":1,\"exitcode\":1,\"err-data\":\"" + stderr + "\"}}"));
 
         ProxmoxClient client = new ProxmoxClient(serverConfig(false));
-        IOException ex = assertThrows(IOException.class, () -> client.execCommandViaGuestAgent("950", "systemctl", "start", "jenkins-agent"));
+        IOException ex = assertThrows(
+                IOException.class, () -> client.execCommandViaGuestAgent("950", "systemctl", "start", "jenkins-agent"));
         assertTrue(ex.getMessage().contains("permission denied"));
     }
 

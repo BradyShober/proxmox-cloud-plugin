@@ -1031,8 +1031,8 @@ public class ProxmoxCloudTest {
         Objects.requireNonNull(slave.toComputer())
                 .setTemporarilyOffline(
                         true,
-                        new OfflineCause.ByCLI(ProxmoxRetentionStrategy.MAX_BUILDS_DRAIN_REASON_PREFIX
-                                + "agent reached max builds"));
+                        new OfflineCause.ByCLI(
+                                ProxmoxRetentionStrategy.MAX_BUILDS_DRAIN_REASON_PREFIX + "agent reached max builds"));
 
         Method method = ProxmoxCloud.class.getDeclaredMethod("isDrainingForMaxBuilds", Slave.class);
         method.setAccessible(true);
@@ -1053,8 +1053,8 @@ public class ProxmoxCloudTest {
 
     @Test
     public void testResolveRecoveredAgentNameFallsBackToTemplate() throws Exception {
-        Method method = ProxmoxCloud.class.getDeclaredMethod(
-                "resolveRecoveredAgentName", ProxmoxClient.ProxmoxVmSummary.class);
+        Method method =
+                ProxmoxCloud.class.getDeclaredMethod("resolveRecoveredAgentName", ProxmoxClient.ProxmoxVmSummary.class);
         method.setAccessible(true);
 
         ProxmoxClient.ProxmoxVmSummary unnamed =
@@ -1068,8 +1068,8 @@ public class ProxmoxCloudTest {
 
     @Test
     public void testIsReconciliationCandidateRequiresManagedTags() throws Exception {
-        Method method = ProxmoxCloud.class.getDeclaredMethod(
-                "isReconciliationCandidate", ProxmoxClient.ProxmoxVmSummary.class);
+        Method method =
+                ProxmoxCloud.class.getDeclaredMethod("isReconciliationCandidate", ProxmoxClient.ProxmoxVmSummary.class);
         method.setAccessible(true);
 
         ProxmoxClient.ProxmoxVmSummary managed = new ProxmoxClient.ProxmoxVmSummary(
@@ -1096,7 +1096,8 @@ public class ProxmoxCloudTest {
         jenkinsRule.jenkins.addNode(buildDumbSlave(proxmoxCloud, "lookup-agent", "930", null));
         jenkinsRule.createSlave();
 
-        Method method = ProxmoxCloud.class.getDeclaredMethod("findNodeByVmId", jenkins.model.Jenkins.class, String.class);
+        Method method =
+                ProxmoxCloud.class.getDeclaredMethod("findNodeByVmId", jenkins.model.Jenkins.class, String.class);
         method.setAccessible(true);
 
         Node found = (Node) method.invoke(proxmoxCloud, jenkinsRule.jenkins, "930");
@@ -1157,7 +1158,8 @@ public class ProxmoxCloudTest {
         Field instancesField = ProxmoxCloud.class.getDeclaredField("instances");
         instancesField.setAccessible(true);
         @SuppressWarnings("unchecked")
-        java.util.List<ProxmoxInstance> mutableInstances = (java.util.List<ProxmoxInstance>) instancesField.get(proxmoxCloud);
+        java.util.List<ProxmoxInstance> mutableInstances =
+                (java.util.List<ProxmoxInstance>) instancesField.get(proxmoxCloud);
         mutableInstances.add(new ProxmoxInstance("998", "terminate-me"));
 
         proxmoxCloud.terminateInstance("998");
@@ -1178,7 +1180,8 @@ public class ProxmoxCloudTest {
 
         Thread.currentThread().interrupt();
         try {
-            assertThrows(java.lang.reflect.InvocationTargetException.class, () -> method.invoke(proxmoxCloud, "UPID:never"));
+            assertThrows(
+                    java.lang.reflect.InvocationTargetException.class, () -> method.invoke(proxmoxCloud, "UPID:never"));
         } finally {
             Thread.interrupted();
         }
@@ -1206,7 +1209,8 @@ public class ProxmoxCloudTest {
                     "900",
                     "https://jenkins.example/jnlpJars/agent.jar",
                     "/home/jenkins/agent.jar",
-                    new String[] {"wget", "-O", "/home/jenkins/agent.jar", "https://jenkins.example/jnlpJars/agent.jar"});
+                    new String[] {"wget", "-O", "/home/jenkins/agent.jar", "https://jenkins.example/jnlpJars/agent.jar"
+                    });
             assertFalse(result);
         } finally {
             Thread.interrupted();
@@ -1356,7 +1360,8 @@ public class ProxmoxCloudTest {
         }
 
         @Override
-        public String cloneVmWithCloudInit(String sourceVmId, String newVmId, String newVmName, String cloudInitScript) {
+        public String cloneVmWithCloudInit(
+                String sourceVmId, String newVmId, String newVmName, String cloudInitScript) {
             String upid = "UPID:clone:" + newVmId;
             taskCompletion.put(upid, true);
             return upid;
@@ -1392,9 +1397,7 @@ public class ProxmoxCloudTest {
         @Override
         public void execCommandViaGuestAgent(String vmId, String... commandAndArgs) throws Exception {
             execCommandCount++;
-            if (commandAndArgs != null
-                    && commandAndArgs.length > 0
-                    && failingCommands.contains(commandAndArgs[0])) {
+            if (commandAndArgs != null && commandAndArgs.length > 0 && failingCommands.contains(commandAndArgs[0])) {
                 throw new IOException("forced command failure for test");
             }
         }
