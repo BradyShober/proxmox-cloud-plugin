@@ -5,12 +5,16 @@ import static org.junit.jupiter.api.Assertions.*;
 import com.cloudbees.plugins.credentials.CredentialsProvider;
 import com.cloudbees.plugins.credentials.CredentialsScope;
 import com.cloudbees.plugins.credentials.domains.Domain;
+import com.google.gson.JsonObject;
 import hudson.util.Secret;
 import java.io.IOException;
+import java.lang.reflect.Method;
 import java.util.Objects;
+import okhttp3.RequestBody;
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
 import okhttp3.mockwebserver.RecordedRequest;
+import okio.Buffer;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -57,6 +61,19 @@ class ProxmoxClientTest {
 
     private ProxmoxServerConfig serverConfig(boolean verifySsl) {
         return new ProxmoxServerConfig(baseUrl, CRED_ID, verifySsl, "pve");
+    }
+
+    private Object invokePrivate(ProxmoxClient client, String methodName, Class<?>[] parameterTypes, Object... args)
+            throws Exception {
+        Method method = ProxmoxClient.class.getDeclaredMethod(methodName, parameterTypes);
+        method.setAccessible(true);
+        return method.invoke(client, args);
+    }
+
+    private static String bodyToString(RequestBody body) throws IOException {
+        Buffer buffer = new Buffer();
+        body.writeTo(buffer);
+        return buffer.readUtf8();
     }
 
     /** Enqueue a successful /api2/json/version response (used by verifyAuthentication). */
@@ -359,6 +376,30 @@ class ProxmoxClientTest {
     }
 
     @Test
+    void testStartVmThrowsOnForbiddenResponse(JenkinsRule j) throws Exception {
+        addCredential(j);
+        enqueueVersionOk();
+        mockWebServer.enqueue(new MockResponse().setResponseCode(403).setBody("permission denied"));
+
+        ProxmoxClient client = new ProxmoxClient(serverConfig(false));
+        IOException ex = assertThrows(IOException.class, () -> client.startVm("921"));
+
+        assertTrue(ex.getMessage().contains("HTTP 403"));
+    }
+
+    @Test
+    void testStartVmThrowsWhenSuccessfulResponseHasNoData(JenkinsRule j) throws Exception {
+        addCredential(j);
+        enqueueVersionOk();
+        mockWebServer.enqueue(new MockResponse().setResponseCode(200).setBody("{}"));
+
+        ProxmoxClient client = new ProxmoxClient(serverConfig(false));
+        IOException ex = assertThrows(IOException.class, () -> client.startVm("922"));
+
+        assertTrue(ex.getMessage().contains("No UPID returned from API call"));
+    }
+
+    @Test
     void testWriteFileViaGuestAgentFallsBackToBase64Encoding(JenkinsRule j) throws Exception {
         addCredential(j);
         enqueueVersionOk();
@@ -494,6 +535,258 @@ class ProxmoxClientTest {
         IllegalArgumentException ex =
                 assertThrows(IllegalArgumentException.class, () -> client.execCommandViaGuestAgent("900"));
         assertTrue(ex.getMessage().contains("non-empty command"));
+    }
+
+    @Test
+    void testExtractNodeFromUpidReturnsNodeSegment(JenkinsRule j) throws Exception {
+        addCredential(j);
+        enqueueVersionOk();
+
+        ProxmoxClient client = new ProxmoxClient(serverConfig(false));
+
+        assertEquals(
+                "pve",
+                invokePrivate(
+                        client,
+                        "extractNodeFromUpid",
+                        new Class<?>[] {String.class},
+                        "UPID:pve:0001:0002:0003:qmclone:900:root@pam:"));
+    }
+
+    @Test
+    void testParseVmSummariesReturnsEmptyWhenDataIsMissingOrNotAnArray(JenkinsRule j) throws Exception {
+        addCredential(j);
+        enqueueVersionOk();
+
+        ProxmoxClient client = new ProxmoxClient(serverConfig(false));
+
+        @SuppressWarnings("unchecked")
+        java.util.List<ProxmoxClient.ProxmoxVmSummary> noData = (java.util.List<ProxmoxClient.ProxmoxVmSummary>)
+                invokePrivate(client, "parseVmSummaries", new Class<?>[] {String.class}, "{}");
+        @SuppressWarnings("unchecked")
+        java.util.List<ProxmoxClient.ProxmoxVmSummary> objectData = (java.util.List<ProxmoxClient.ProxmoxVmSummary>)
+                invokePrivate(client, "parseVmSummaries", new Class<?>[] {String.class}, "{\"data\":{}}");
+
+        assertTrue(noData.isEmpty());
+        assertTrue(objectData.isEmpty());
+    }
+
+    @Test
+    void testDecodeExecDataFieldHandlesBlankAndInvalidBase64(JenkinsRule j) throws Exception {
+        addCredential(j);
+        enqueueVersionOk();
+
+        ProxmoxClient client = new ProxmoxClient(serverConfig(false));
+        JsonObject blankField = new JsonObject();
+        blankField.addProperty("err-data", "");
+        JsonObject invalidField = new JsonObject();
+        invalidField.addProperty("err-data", "not-base64!!!");
+
+        assertEquals(
+                "",
+                invokePrivate(
+                        client,
+                        "decodeExecDataField",
+                        new Class<?>[] {JsonObject.class, String.class},
+                        blankField,
+                        "err-data"));
+        assertEquals(
+                "not-base64!!!",
+                invokePrivate(
+                        client,
+                        "decodeExecDataField",
+                        new Class<?>[] {JsonObject.class, String.class},
+                        invalidField,
+                        "err-data"));
+    }
+
+    @Test
+    void testBuildCloudInitRequestBodySupportsNormalAndCompatibilityEncoding(JenkinsRule j) throws Exception {
+        addCredential(j);
+        enqueueVersionOk();
+
+        ProxmoxClient client = new ProxmoxClient(serverConfig(false));
+
+        RequestBody standardBody = (RequestBody) invokePrivate(
+                client,
+                "buildCloudInitRequestBody",
+                new Class<?>[] {String.class, String.class, String.class, boolean.class},
+                " jenkins ",
+                "ssh-rsa AAAA test@host",
+                " tag-one ; tag-two ",
+                false);
+        RequestBody compatibilityBody = (RequestBody) invokePrivate(
+                client,
+                "buildCloudInitRequestBody",
+                new Class<?>[] {String.class, String.class, String.class, boolean.class},
+                " ",
+                "ssh-rsa AAAA test@host",
+                " ",
+                true);
+
+        String standard = bodyToString(standardBody);
+        String compatibility = bodyToString(compatibilityBody);
+
+        assertTrue(standard.contains("ciuser=jenkins"));
+        assertTrue(standard.contains("sshkeys=ssh-rsa%20AAAA%20test%40host"));
+        assertTrue(standard.contains("ipconfig0=ip%3Ddhcp"));
+        assertTrue(standard.contains("tags=tag-one%20%3B%20tag-two"));
+
+        assertFalse(compatibility.contains("ciuser="));
+        assertFalse(compatibility.contains("tags="));
+        assertTrue(compatibility.contains("sshkeys=ssh-rsa%2520AAAA%2520test%2540host"));
+    }
+
+    @Test
+    void testIsInvalidUrlEncodedSshKeyErrorHandlesNullAndMatchingMessages(JenkinsRule j) throws Exception {
+        addCredential(j);
+        enqueueVersionOk();
+
+        ProxmoxClient client = new ProxmoxClient(serverConfig(false));
+
+        assertEquals(
+                false,
+                invokePrivate(
+                        client, "isInvalidUrlEncodedSshKeyError", new Class<?>[] {IOException.class}, new Object[] {null
+                        }));
+        assertEquals(
+                false,
+                invokePrivate(
+                        client,
+                        "isInvalidUrlEncodedSshKeyError",
+                        new Class<?>[] {IOException.class},
+                        new IOException("different error")));
+        assertEquals(
+                true,
+                invokePrivate(
+                        client,
+                        "isInvalidUrlEncodedSshKeyError",
+                        new Class<?>[] {IOException.class},
+                        new IOException("sshkeys: invalid urlencoded string")));
+    }
+
+    @Test
+    void testNormalizeSshPublicKeyCoversBlankUnknownTypeAndRecognizedKeyWithoutComment() {
+        assertEquals("", ProxmoxClient.normalizeSshPublicKey("   \n\t  "));
+        assertEquals(
+                "custom-key AAAA BBBB comment",
+                ProxmoxClient.normalizeSshPublicKey("custom-key   AAAA BBBB   comment"));
+        assertEquals("ssh-ed25519 AAAABBBBCCCC", ProxmoxClient.normalizeSshPublicKey("ssh-ed25519 AAAA BBBB CCCC"));
+    }
+
+    @Test
+    void testExtractFirstIpv4SkipsMissingDataLoopbackAndIpv6(JenkinsRule j) throws Exception {
+        addCredential(j);
+        enqueueVersionOk();
+
+        ProxmoxClient client = new ProxmoxClient(serverConfig(false));
+
+        assertNull(invokePrivate(client, "extractFirstIpv4", new Class<?>[] {JsonObject.class}, new Object[] {null}));
+
+        JsonObject noResult = new JsonObject();
+        noResult.add("data", new JsonObject());
+        assertNull(invokePrivate(client, "extractFirstIpv4", new Class<?>[] {JsonObject.class}, noResult));
+
+        JsonObject valid = com.google.gson.JsonParser.parseString("{\"data\":{\"result\":["
+                        + "{\"name\":\"lo\",\"ip-addresses\":[{\"ip-address-type\":\"ipv4\",\"ip-address\":\"127.0.0.1\"}]},"
+                        + "{\"name\":\"eth0\",\"ip-addresses\":[{\"ip-address-type\":\"ipv6\",\"ip-address\":\"::1\"},{\"ip-address-type\":\"ipv4\",\"ip-address\":\"198.51.100.42\"}]}"
+                        + "]}}")
+                .getAsJsonObject();
+
+        assertEquals(
+                "198.51.100.42", invokePrivate(client, "extractFirstIpv4", new Class<?>[] {JsonObject.class}, valid));
+    }
+
+    @Test
+    void testParseVmSummaryAndReadNullableFieldCoverEdgeCases(JenkinsRule j) throws Exception {
+        addCredential(j);
+        enqueueVersionOk();
+
+        ProxmoxClient client = new ProxmoxClient(serverConfig(false));
+
+        assertNull(invokePrivate(
+                client, "parseVmSummary", new Class<?>[] {com.google.gson.JsonElement.class}, new Object[] {null}));
+        assertNull(invokePrivate(
+                client,
+                "parseVmSummary",
+                new Class<?>[] {com.google.gson.JsonElement.class},
+                com.google.gson.JsonParser.parseString("{}").getAsJsonObject()));
+
+        JsonObject vm = com.google.gson.JsonParser.parseString(
+                        "{\"vmid\":301,\"name\":null,\"status\":null,\"tags\":null}")
+                .getAsJsonObject();
+        ProxmoxClient.ProxmoxVmSummary summary = (ProxmoxClient.ProxmoxVmSummary)
+                invokePrivate(client, "parseVmSummary", new Class<?>[] {com.google.gson.JsonElement.class}, vm);
+
+        assertNotNull(summary);
+        assertEquals("301", summary.getVmId());
+        assertNull(summary.getName());
+        assertNull(summary.getStatus());
+        assertEquals("", summary.getTags());
+
+        assertNull(invokePrivate(
+                client, "readNullableField", new Class<?>[] {JsonObject.class, String.class}, vm, "missing"));
+        assertNull(invokePrivate(
+                client, "readNullableField", new Class<?>[] {JsonObject.class, String.class}, vm, "name"));
+        assertEquals(
+                "301",
+                invokePrivate(
+                        client, "readNullableField", new Class<?>[] {JsonObject.class, String.class}, vm, "vmid"));
+    }
+
+    @Test
+    void testExtractInterfaceAndIpv4AddressHelpersCoverInvalidInputs(JenkinsRule j) throws Exception {
+        addCredential(j);
+        enqueueVersionOk();
+
+        ProxmoxClient client = new ProxmoxClient(serverConfig(false));
+
+        assertNull(invokePrivate(
+                client, "extractInterfaceIpv4", new Class<?>[] {com.google.gson.JsonElement.class}, new Object[] {null
+                }));
+        assertNull(invokePrivate(
+                client,
+                "extractInterfaceIpv4",
+                new Class<?>[] {com.google.gson.JsonElement.class},
+                com.google.gson.JsonParser.parseString("{\"name\":\"lo\",\"ip-addresses\":[]}")
+                        .getAsJsonObject()));
+
+        JsonObject ipv6 = com.google.gson.JsonParser.parseString(
+                        "{\"ip-address-type\":\"ipv6\",\"ip-address\":\"::1\"}")
+                .getAsJsonObject();
+        JsonObject loopback = com.google.gson.JsonParser.parseString(
+                        "{\"ip-address-type\":\"ipv4\",\"ip-address\":\"127.0.0.1\"}")
+                .getAsJsonObject();
+        JsonObject valid = com.google.gson.JsonParser.parseString(
+                        "{\"ip-address-type\":\"ipv4\",\"ip-address\":\"203.0.113.7\"}")
+                .getAsJsonObject();
+
+        assertNull(
+                invokePrivate(client, "extractIpv4Address", new Class<?>[] {com.google.gson.JsonElement.class}, ipv6));
+        assertNull(invokePrivate(
+                client, "extractIpv4Address", new Class<?>[] {com.google.gson.JsonElement.class}, loopback));
+        assertEquals(
+                "203.0.113.7",
+                invokePrivate(client, "extractIpv4Address", new Class<?>[] {com.google.gson.JsonElement.class}, valid));
+
+        JsonObject iface = com.google.gson.JsonParser.parseString(
+                        "{\"name\":\"eth0\",\"ip-addresses\":[{\"ip-address-type\":\"ipv6\",\"ip-address\":\"::1\"},{\"ip-address-type\":\"ipv4\",\"ip-address\":\"203.0.113.8\"}]}")
+                .getAsJsonObject();
+        assertEquals(
+                "203.0.113.8",
+                invokePrivate(
+                        client, "extractInterfaceIpv4", new Class<?>[] {com.google.gson.JsonElement.class}, iface));
+    }
+
+    @Test
+    void testCompletedTaskStatusNullAndCloseAreCovered(JenkinsRule j) throws Exception {
+        addCredential(j);
+        enqueueVersionOk();
+
+        ProxmoxClient client = new ProxmoxClient(serverConfig(false));
+
+        assertFalse(ProxmoxClient.isCompletedTaskStatus(null));
+        assertDoesNotThrow(client::close);
     }
 
     @Test
