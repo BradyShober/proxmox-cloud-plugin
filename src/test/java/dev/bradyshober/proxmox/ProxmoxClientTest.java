@@ -319,6 +319,152 @@ class ProxmoxClientTest {
     }
 
     @Test
+    void testCloneVmWithCloudInitPostsExpectedRequest(JenkinsRule j) throws Exception {
+        addCredential(j);
+        enqueueVersionOk();
+        mockWebServer.enqueue(new MockResponse()
+                .setResponseCode(200)
+                .setBody("{\"data\":\"UPID:pve:0004:0004:0004:qmclone:910:root@pam:\"}"));
+
+        ProxmoxClient client = new ProxmoxClient(serverConfig(false));
+        String upid = client.cloneVmWithCloudInit("100", "910", "agent-910", null);
+
+        assertTrue(upid.contains("qmclone"));
+        mockWebServer.takeRequest(); // version
+        RecordedRequest cloneRequest = mockWebServer.takeRequest();
+        assertEquals("POST", cloneRequest.getMethod());
+        assertEquals("/api2/json/nodes/pve/qemu/100/clone", cloneRequest.getPath());
+        String body = cloneRequest.getBody().readUtf8();
+        assertTrue(body.contains("newid=910"));
+        assertTrue(body.contains("name=agent-910"));
+        assertTrue(body.contains("full=1"));
+    }
+
+    @Test
+    void testStartVmAndStopVmReturnTaskUpids(JenkinsRule j) throws Exception {
+        addCredential(j);
+        enqueueVersionOk();
+        mockWebServer.enqueue(new MockResponse().setResponseCode(200).setBody("{\"data\":\"UPID:start\"}"));
+        mockWebServer.enqueue(new MockResponse().setResponseCode(200).setBody("{\"data\":\"UPID:stop\"}"));
+
+        ProxmoxClient client = new ProxmoxClient(serverConfig(false));
+        assertEquals("UPID:start", client.startVm("920"));
+        assertEquals("UPID:stop", client.stopVm("920"));
+
+        mockWebServer.takeRequest(); // version
+        RecordedRequest startRequest = mockWebServer.takeRequest();
+        RecordedRequest stopRequest = mockWebServer.takeRequest();
+        assertEquals("/api2/json/nodes/pve/qemu/920/status/start", startRequest.getPath());
+        assertEquals("/api2/json/nodes/pve/qemu/920/status/stop", stopRequest.getPath());
+    }
+
+    @Test
+    void testWriteFileViaGuestAgentFallsBackToBase64Encoding(JenkinsRule j) throws Exception {
+        addCredential(j);
+        enqueueVersionOk();
+        mockWebServer.enqueue(new MockResponse().setResponseCode(500).setBody("plain write failed"));
+        mockWebServer.enqueue(new MockResponse().setResponseCode(200).setBody("{\"data\":null}"));
+
+        ProxmoxClient client = new ProxmoxClient(serverConfig(false));
+        client.writeFileViaGuestAgent("930", "/tmp/test.txt", "hello world");
+
+        mockWebServer.takeRequest(); // version
+        RecordedRequest firstWrite = mockWebServer.takeRequest();
+        RecordedRequest secondWrite = mockWebServer.takeRequest();
+        assertEquals("POST", firstWrite.getMethod());
+        assertEquals("POST", secondWrite.getMethod());
+        assertTrue(firstWrite.getBody().readUtf8().contains("content=hello%20world"));
+        String secondBody = secondWrite.getBody().readUtf8();
+        assertTrue(secondBody.contains("encode=1"));
+        assertTrue(secondBody.contains("content=aGVsbG8gd29ybGQ%3D"));
+    }
+
+    @Test
+    void testExecCommandViaGuestAgentRetriesOn596AndCompletes(JenkinsRule j) throws Exception {
+        addCredential(j);
+        enqueueVersionOk();
+        mockWebServer.enqueue(new MockResponse().setResponseCode(596).setBody("temporary guest agent issue"));
+        mockWebServer.enqueue(new MockResponse().setResponseCode(200).setBody("{\"data\":{\"result\":\"pong\"}}"));
+        mockWebServer.enqueue(new MockResponse().setResponseCode(200).setBody("{\"data\":{\"pid\":42}}"));
+        mockWebServer.enqueue(new MockResponse().setResponseCode(200).setBody("{\"data\":{\"exited\":1,\"exitcode\":0}}"));
+
+        ProxmoxClient client = new ProxmoxClient(serverConfig(false));
+        assertDoesNotThrow(() -> client.execCommandViaGuestAgent("940", "systemctl", "daemon-reload"));
+
+        mockWebServer.takeRequest(); // version
+        RecordedRequest firstExec = mockWebServer.takeRequest();
+        RecordedRequest pingProbe = mockWebServer.takeRequest();
+        RecordedRequest secondExec = mockWebServer.takeRequest();
+        RecordedRequest statusPoll = mockWebServer.takeRequest();
+
+        assertTrue(firstExec.getPath().contains("/agent/exec"));
+        assertTrue(pingProbe.getPath().contains("/agent/ping"));
+        assertTrue(secondExec.getPath().contains("/agent/exec"));
+        assertTrue(statusPoll.getPath().contains("/agent/exec-status?pid=42"));
+    }
+
+    @Test
+    void testExecCommandViaGuestAgentThrowsWithDecodedStderr(JenkinsRule j) throws Exception {
+        addCredential(j);
+        enqueueVersionOk();
+        mockWebServer.enqueue(new MockResponse().setResponseCode(200).setBody("{\"data\":{\"pid\":7}}"));
+        String stderr = java.util.Base64.getEncoder().encodeToString("permission denied".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        mockWebServer.enqueue(new MockResponse()
+                .setResponseCode(200)
+                .setBody("{\"data\":{\"exited\":1,\"exitcode\":1,\"err-data\":\"" + stderr + "\"}}"));
+
+        ProxmoxClient client = new ProxmoxClient(serverConfig(false));
+        IOException ex = assertThrows(IOException.class, () -> client.execCommandViaGuestAgent("950", "systemctl", "start", "jenkins-agent"));
+        assertTrue(ex.getMessage().contains("permission denied"));
+    }
+
+    @Test
+    void testGetVmIpAddressReturnsFirstNonLoopbackIpv4(JenkinsRule j) throws Exception {
+        addCredential(j);
+        enqueueVersionOk();
+        mockWebServer.enqueue(new MockResponse()
+                .setResponseCode(200)
+                .setBody("{\"data\":{\"result\":["
+                        + "{\"name\":\"lo\",\"ip-addresses\":[{\"ip-address-type\":\"ipv4\",\"ip-address\":\"127.0.0.1\"}]},"
+                        + "{\"name\":\"eth0\",\"ip-addresses\":[{\"ip-address-type\":\"ipv4\",\"ip-address\":\"192.0.2.55\"}]}"
+                        + "]}}"));
+
+        ProxmoxClient client = new ProxmoxClient(serverConfig(false));
+        String ip = client.getVmIpAddress("960");
+
+        assertEquals("192.0.2.55", ip);
+    }
+
+    @Test
+    void testConfigureVmCloudInitRetriesWithCompatibilityEncoding(JenkinsRule j) throws Exception {
+        addCredential(j);
+        enqueueVersionOk();
+        mockWebServer.enqueue(new MockResponse()
+                .setResponseCode(400)
+                .setBody("parameter verification failed - sshkeys: invalid urlencoded string"));
+        mockWebServer.enqueue(new MockResponse()
+                .setResponseCode(200)
+                .setBody("{\"data\":\"UPID:pve:0005:0005:0005:qmconfig:970:root@pam:\"}"));
+        mockWebServer.enqueue(new MockResponse()
+                .setResponseCode(200)
+                .setBody("{\"data\":{\"status\":\"stopped\",\"exitstatus\":\"OK\"}}"));
+
+        ProxmoxClient client = new ProxmoxClient(serverConfig(false));
+        client.configureVmCloudInit("970", "jenkins", "ssh-rsa AAAA test@host", "jenkins-proxmox-plugin");
+
+        mockWebServer.takeRequest(); // version
+        RecordedRequest firstPut = mockWebServer.takeRequest();
+        RecordedRequest secondPut = mockWebServer.takeRequest();
+
+        assertEquals("PUT", firstPut.getMethod());
+        assertEquals("PUT", secondPut.getMethod());
+        String firstBody = firstPut.getBody().readUtf8();
+        String secondBody = secondPut.getBody().readUtf8();
+        assertTrue(firstBody.contains("sshkeys=ssh-rsa%20AAAA%20test%40host"));
+        assertTrue(secondBody.contains("sshkeys=ssh-rsa%2520AAAA%2520test%2540host"));
+    }
+
+    @Test
     void testListNodeVmsSkipsInvalidEntries(JenkinsRule j) throws Exception {
         addCredential(j);
         enqueueVersionOk();

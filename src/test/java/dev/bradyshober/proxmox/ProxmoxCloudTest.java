@@ -10,10 +10,12 @@ import hudson.model.Descriptor;
 import hudson.model.Executor;
 import hudson.model.Label;
 import hudson.model.Node;
+import hudson.model.Slave;
 import hudson.model.labels.LabelAtom;
 import hudson.slaves.ComputerConnector;
 import hudson.slaves.ComputerLauncher;
 import hudson.slaves.JNLPLauncher;
+import hudson.slaves.NodeProvisioner;
 import hudson.slaves.OfflineCause;
 import hudson.slaves.SlaveComputer;
 import hudson.util.FormValidation;
@@ -22,6 +24,7 @@ import hudson.util.Secret;
 import java.io.IOException;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.util.Collection;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
@@ -989,6 +992,266 @@ public class ProxmoxCloudTest {
     }
 
     @Test
+    public void testCloneReservationExposesUpidClone() {
+        ProxmoxCloud.CloneReservation reservation = new ProxmoxCloud.CloneReservation("777", "UPID:test");
+        assertEquals("UPID:test", reservation.getUpidClone());
+    }
+
+    @Test
+    public void testAdditionalCloudGettersAndSetters() {
+        assertEquals("pve", proxmoxCloud.getNode());
+        assertTrue(proxmoxCloud.isVerifySsl());
+        assertEquals("100", proxmoxCloud.getTemplateVmId());
+        assertEquals("proxmox-agent", proxmoxCloud.getAgentNameTemplate());
+        assertEquals(5, proxmoxCloud.getMaxInstances());
+        assertEquals("jenkins", proxmoxCloud.getSshUsername());
+        assertEquals("proxmox", proxmoxCloud.getLabels());
+
+        proxmoxCloud.setNumExecutors(3);
+        assertEquals(3, proxmoxCloud.getNumExecutors());
+    }
+
+    @Test
+    public void testVmAllocationScopeKeyHandlesNullHostAndNode() throws Exception {
+        proxmoxCloud.getServerConfig().setHost(null);
+        proxmoxCloud.getServerConfig().setNode(null);
+
+        Method method = ProxmoxCloud.class.getDeclaredMethod("getVmAllocationScopeKey");
+        method.setAccessible(true);
+
+        assertEquals("|", method.invoke(proxmoxCloud));
+    }
+
+    @Test
+    @WithJenkins
+    public void testIsDrainingForMaxBuildsDetectsOfflineReason(JenkinsRule jenkinsRule) throws Exception {
+        ProxmoxNode slave = buildDumbSlave(proxmoxCloud, "max-builds-draining", "811", null);
+        jenkinsRule.jenkins.addNode(slave);
+
+        Objects.requireNonNull(slave.toComputer())
+                .setTemporarilyOffline(
+                        true,
+                        new OfflineCause.ByCLI(ProxmoxRetentionStrategy.MAX_BUILDS_DRAIN_REASON_PREFIX
+                                + "agent reached max builds"));
+
+        Method method = ProxmoxCloud.class.getDeclaredMethod("isDrainingForMaxBuilds", Slave.class);
+        method.setAccessible(true);
+
+        assertTrue((boolean) method.invoke(proxmoxCloud, slave));
+    }
+
+    @Test
+    public void testIsRecoverableVmStateCoversAllBranches() throws Exception {
+        Method method = ProxmoxCloud.class.getDeclaredMethod("isRecoverableVmState", String.class, String.class);
+        method.setAccessible(true);
+
+        assertTrue((boolean) method.invoke(proxmoxCloud, "501", "running"));
+        assertTrue((boolean) method.invoke(proxmoxCloud, "501", "starting"));
+        assertFalse((boolean) method.invoke(proxmoxCloud, "501", "stopped"));
+        assertFalse((boolean) method.invoke(proxmoxCloud, "501", null));
+    }
+
+    @Test
+    public void testResolveRecoveredAgentNameFallsBackToTemplate() throws Exception {
+        Method method = ProxmoxCloud.class.getDeclaredMethod(
+                "resolveRecoveredAgentName", ProxmoxClient.ProxmoxVmSummary.class);
+        method.setAccessible(true);
+
+        ProxmoxClient.ProxmoxVmSummary unnamed =
+                new ProxmoxClient.ProxmoxVmSummary("915", "", "running", "jenkins-proxmox-plugin");
+        ProxmoxClient.ProxmoxVmSummary named =
+                new ProxmoxClient.ProxmoxVmSummary("916", "restored-agent", "running", "jenkins-proxmox-plugin");
+
+        assertEquals("proxmox-agent-915", method.invoke(proxmoxCloud, unnamed));
+        assertEquals("restored-agent", method.invoke(proxmoxCloud, named));
+    }
+
+    @Test
+    public void testIsReconciliationCandidateRequiresManagedTags() throws Exception {
+        Method method = ProxmoxCloud.class.getDeclaredMethod(
+                "isReconciliationCandidate", ProxmoxClient.ProxmoxVmSummary.class);
+        method.setAccessible(true);
+
+        ProxmoxClient.ProxmoxVmSummary managed = new ProxmoxClient.ProxmoxVmSummary(
+                "920", "managed", "running", "jenkins-proxmox-plugin;jenkins-cloud-proxmox");
+        ProxmoxClient.ProxmoxVmSummary unmanaged =
+                new ProxmoxClient.ProxmoxVmSummary("921", "other", "running", "jenkins-cloud-other");
+
+        assertFalse((boolean) method.invoke(proxmoxCloud, new Object[] {null}));
+        assertTrue((boolean) method.invoke(proxmoxCloud, managed));
+        assertFalse((boolean) method.invoke(proxmoxCloud, unmanaged));
+    }
+
+    @Test
+    public void testResolveReconciledVmIpReturnsNullForInboundConnector() throws Exception {
+        Method method = ProxmoxCloud.class.getDeclaredMethod("resolveReconciledVmIp", String.class);
+        method.setAccessible(true);
+
+        assertNull(method.invoke(proxmoxCloud, "999"));
+    }
+
+    @Test
+    @WithJenkins
+    public void testFindNodeByVmIdFindsMatchingRetentionVmId(JenkinsRule jenkinsRule) throws Exception {
+        jenkinsRule.jenkins.addNode(buildDumbSlave(proxmoxCloud, "lookup-agent", "930", null));
+        jenkinsRule.createSlave();
+
+        Method method = ProxmoxCloud.class.getDeclaredMethod("findNodeByVmId", jenkins.model.Jenkins.class, String.class);
+        method.setAccessible(true);
+
+        Node found = (Node) method.invoke(proxmoxCloud, jenkinsRule.jenkins, "930");
+        Node missing = (Node) method.invoke(proxmoxCloud, jenkinsRule.jenkins, "does-not-exist");
+
+        assertNotNull(found);
+        assertEquals("lookup-agent", found.getNodeName());
+        assertNull(missing);
+    }
+
+    @Test
+    @WithJenkins
+    public void testReconcileCloudNodesOnStartupWithRegisteredCloud(JenkinsRule jenkinsRule) {
+        jenkinsRule.jenkins.clouds.add(proxmoxCloud);
+        assertDoesNotThrow(ProxmoxCloud::reconcileCloudNodesOnStartup);
+    }
+
+    @Test
+    @WithJenkins
+    public void testProvisionCreatesPlannedNodeUsingFakeClient(JenkinsRule jenkinsRule) throws Exception {
+        FakeProxmoxClient fakeClient = newFakeProxmoxClient();
+        fakeClient.nextVmIds.add("950");
+
+        setPrivateField(proxmoxCloud, "proxmoxClient", fakeClient);
+        setPrivateField(proxmoxCloud, "startupReconciled", true);
+
+        Collection<NodeProvisioner.PlannedNode> planned = proxmoxCloud.provision(new LabelAtom("proxmox"), 1);
+        assertEquals(1, planned.size());
+
+        NodeProvisioner.PlannedNode plannedNode = planned.iterator().next();
+        Node provisioned = plannedNode.future.get(5, TimeUnit.SECONDS);
+
+        assertNotNull(provisioned);
+        assertTrue(fakeClient.execCommandCount > 0, "Guest agent commands should be executed in inbound provisioning");
+    }
+
+    @Test
+    @WithJenkins
+    public void testReconcileExistingTaggedVmsReattachesManagedInboundNode(JenkinsRule jenkinsRule) throws Exception {
+        FakeProxmoxClient fakeClient = newFakeProxmoxClient();
+        fakeClient.listedVms.add(new ProxmoxClient.ProxmoxVmSummary(
+                "940", "restored-vm", "running", proxmoxCloud.buildProvisioningTags()));
+
+        setPrivateField(proxmoxCloud, "proxmoxClient", fakeClient);
+
+        proxmoxCloud.reconcileExistingTaggedVms();
+
+        assertNotNull(jenkinsRule.jenkins.getNode("restored-vm"));
+        assertTrue(proxmoxCloud.getInstances().stream().anyMatch(i -> "940".equals(i.getVmId())));
+    }
+
+    @Test
+    public void testTerminateInstanceRemovesTrackedInstanceWithFakeClient() throws Exception {
+        FakeProxmoxClient fakeClient = newFakeProxmoxClient();
+        fakeClient.taskCompletion.put("UPID:stop:998", true);
+        setPrivateField(proxmoxCloud, "proxmoxClient", fakeClient);
+
+        Field instancesField = ProxmoxCloud.class.getDeclaredField("instances");
+        instancesField.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        java.util.List<ProxmoxInstance> mutableInstances = (java.util.List<ProxmoxInstance>) instancesField.get(proxmoxCloud);
+        mutableInstances.add(new ProxmoxInstance("998", "terminate-me"));
+
+        proxmoxCloud.terminateInstance("998");
+
+        assertTrue(fakeClient.stoppedVmIds.contains("998"));
+        assertTrue(fakeClient.deletedVmIds.contains("998"));
+        assertTrue(proxmoxCloud.getInstances().stream().noneMatch(i -> "998".equals(i.getVmId())));
+    }
+
+    @Test
+    public void testWaitForTaskCompletionWrapperThrowsWhenSleepInterrupted() throws Exception {
+        FakeProxmoxClient fakeClient = newFakeProxmoxClient();
+        fakeClient.taskCompletion.put("UPID:never", false);
+        setPrivateField(proxmoxCloud, "proxmoxClient", fakeClient);
+
+        Method method = ProxmoxCloud.class.getDeclaredMethod("waitForTaskCompletion", String.class);
+        method.setAccessible(true);
+
+        Thread.currentThread().interrupt();
+        try {
+            assertThrows(java.lang.reflect.InvocationTargetException.class, () -> method.invoke(proxmoxCloud, "UPID:never"));
+        } finally {
+            Thread.interrupted();
+        }
+    }
+
+    @Test
+    public void testTryDownloadWithRetriesReturnsFalseWhenInterrupted() throws Exception {
+        FakeProxmoxClient fakeClient = newFakeProxmoxClient();
+        fakeClient.failingCommands.add("wget");
+
+        Method method = ProxmoxCloud.class.getDeclaredMethod(
+                "tryDownloadWithRetries",
+                ProxmoxClient.class,
+                String.class,
+                String.class,
+                String.class,
+                String[].class);
+        method.setAccessible(true);
+
+        Thread.currentThread().interrupt();
+        try {
+            boolean result = (boolean) method.invoke(
+                    proxmoxCloud,
+                    fakeClient,
+                    "900",
+                    "https://jenkins.example/jnlpJars/agent.jar",
+                    "/home/jenkins/agent.jar",
+                    new String[] {"wget", "-O", "/home/jenkins/agent.jar", "https://jenkins.example/jnlpJars/agent.jar"});
+            assertFalse(result);
+        } finally {
+            Thread.interrupted();
+        }
+    }
+
+    @Test
+    @WithJenkins
+    public void testReconcileMinInstancesProvisionsDeficitWithFakeClient(JenkinsRule jenkinsRule) throws Exception {
+        ProxmoxJNLPConnector connector = new ProxmoxJNLPConnector();
+        connector.setWebSocket(true);
+        ProxmoxCloud minCloud = new ProxmoxCloud(
+                "MinFloorFakeCloud",
+                "https://proxmox.example.com:8006",
+                "proxmox-api-token",
+                false,
+                "pve",
+                "100",
+                "proxmox-agent",
+                2,
+                5,
+                5,
+                connector,
+                "jenkins",
+                null,
+                "proxmox",
+                "/home/jenkins",
+                1);
+
+        FakeProxmoxClient fakeClient = newFakeProxmoxClient();
+        fakeClient.nextVmIds.add("970");
+        fakeClient.nextVmIds.add("971");
+        setPrivateField(minCloud, "proxmoxClient", fakeClient);
+        setPrivateField(minCloud, "startupReconciled", true);
+
+        minCloud.reconcileMinInstances();
+
+        for (int i = 0; i < 20 && minCloud.countLiveCloudNodes() < 2; i++) {
+            Thread.sleep(100);
+        }
+
+        assertTrue(minCloud.countLiveCloudNodes() >= 2);
+    }
+
+    @Test
     @WithJenkins
     public void testDescriptorComputerConnectorDescriptorsAreFiltered(JenkinsRule jenkinsRule) {
         ProxmoxCloud.DescriptorImpl descriptor =
@@ -1041,5 +1304,123 @@ public class ProxmoxCloudTest {
         Method method = ProxmoxCloud.class.getDeclaredMethod("releaseReservedVmId", String.class);
         method.setAccessible(true);
         method.invoke(cloud, vmId);
+    }
+
+    private FakeProxmoxClient newFakeProxmoxClient() throws Exception {
+        sun.misc.Unsafe unsafe = getUnsafe();
+        FakeProxmoxClient fakeClient = (FakeProxmoxClient) unsafe.allocateInstance(FakeProxmoxClient.class);
+        fakeClient.initState();
+        return fakeClient;
+    }
+
+    private static sun.misc.Unsafe getUnsafe() throws Exception {
+        Field field = sun.misc.Unsafe.class.getDeclaredField("theUnsafe");
+        field.setAccessible(true);
+        return (sun.misc.Unsafe) field.get(null);
+    }
+
+    private void setPrivateField(Object target, String fieldName, Object value) throws Exception {
+        Field field = target.getClass().getDeclaredField(fieldName);
+        field.setAccessible(true);
+        field.set(target, value);
+    }
+
+    private static class FakeProxmoxClient extends ProxmoxClient {
+        private java.util.Queue<String> nextVmIds;
+        private java.util.Map<String, Boolean> taskCompletion;
+        private java.util.List<ProxmoxVmSummary> listedVms;
+        private java.util.Set<String> failingCommands;
+        private java.util.List<String> deletedVmIds;
+        private java.util.List<String> stoppedVmIds;
+        private String fixedIpAddress;
+        private int execCommandCount;
+
+        private FakeProxmoxClient() throws IOException {
+            super(new ProxmoxServerConfig("https://unused.invalid:8006", "unused", true, "pve"));
+        }
+
+        private void initState() {
+            nextVmIds = new java.util.ArrayDeque<>();
+            taskCompletion = new java.util.HashMap<>();
+            listedVms = new java.util.ArrayList<>();
+            failingCommands = new java.util.HashSet<>();
+            deletedVmIds = new java.util.ArrayList<>();
+            stoppedVmIds = new java.util.ArrayList<>();
+            fixedIpAddress = "192.0.2.10";
+            execCommandCount = 0;
+        }
+
+        @Override
+        public String getNextVmId() {
+            return nextVmIds.isEmpty() ? "1000" : nextVmIds.remove();
+        }
+
+        @Override
+        public String cloneVmWithCloudInit(String sourceVmId, String newVmId, String newVmName, String cloudInitScript) {
+            String upid = "UPID:clone:" + newVmId;
+            taskCompletion.put(upid, true);
+            return upid;
+        }
+
+        @Override
+        public boolean isTaskComplete(String upid) {
+            return taskCompletion.getOrDefault(upid, true);
+        }
+
+        @Override
+        public void configureVmCloudInit(String vmId, String ciUser, String sshPublicKey, String tags) {
+            // No-op for tests.
+        }
+
+        @Override
+        public String startVm(String vmId) {
+            String upid = "UPID:start:" + vmId;
+            taskCompletion.put(upid, true);
+            return upid;
+        }
+
+        @Override
+        public void waitForGuestAgent(String vmId) {
+            // No-op for tests.
+        }
+
+        @Override
+        public void writeFileViaGuestAgent(String vmId, String filePath, String content) {
+            // No-op for tests.
+        }
+
+        @Override
+        public void execCommandViaGuestAgent(String vmId, String... commandAndArgs) throws Exception {
+            execCommandCount++;
+            if (commandAndArgs != null
+                    && commandAndArgs.length > 0
+                    && failingCommands.contains(commandAndArgs[0])) {
+                throw new IOException("forced command failure for test");
+            }
+        }
+
+        @Override
+        public String getVmIpAddress(String vmId) {
+            return fixedIpAddress;
+        }
+
+        @Override
+        public String stopVm(String vmId) {
+            stoppedVmIds.add(vmId);
+            String upid = "UPID:stop:" + vmId;
+            taskCompletion.put(upid, true);
+            return upid;
+        }
+
+        @Override
+        public String deleteVm(String vmId) {
+            deletedVmIds.add(vmId);
+            return "UPID:delete:" + vmId;
+        }
+
+        @Override
+        public java.util.List<ProxmoxVmSummary> listNodeVms() {
+            return new java.util.ArrayList<>(listedVms);
+        }
     }
 }
