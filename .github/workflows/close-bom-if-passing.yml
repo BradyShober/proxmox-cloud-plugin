@@ -8,4 +8,4 @@ permissions:
   pull-requests: write
 jobs:
   close-bom-if-passing:
-    uses: jenkins-infra/github-reusable-workflows/.github/workflows/close-bom-if-passing.yml@v1
+    uses: jenkins-infra/github-reusable-workflows/.github/workflows/close-bom-if-passing.yml@791f6a10b7e9084eb9d6742293df4a562a801a8d # v1

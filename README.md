@@ -1,13 +1,26 @@
-# proxmox-cloud
+# Proxmox Cloud
 
 ## Introduction
 
-TODO Describe what your plugin does here
+This Jenkins plugin dynamically provisions build agents on Proxmox VE by cloning VMs from a template. Agents can connect via SSH or WebSocket, allowing flexible deployment patterns in virtualized environments.
 
 ## Getting started
 
-TODO Tell users how to configure your plugin here, include screenshots, pipeline examples and 
-configuration-as-code examples.
+1. Configure Proxmox Cloud in Jenkins **Manage Jenkins** → **Configure System** → **Cloud**
+2. Add a Proxmox Cloud instance with:
+   - **Proxmox Host**: URL of your Proxmox VE server (e.g., `https://proxmox.example.com:8006`)
+   - **Proxmox API Token Credential**: Select a Jenkins **Proxmox API Token** credential (username, realm, token identifier, token secret)
+   - **Template VM ID**: The source VM template to clone from
+   - **Instance Limits**: Maximum concurrent instances
+   - **Launcher Strategy**: Choose SSH or WebSocket connectivity
+   - **Agent Labels**: Labels to assign to provisioned agents (space-separated, default: `proxmox`)
+
+VMs will be automatically cloned and started when the Jenkins queue has pending builds. Cloud-init is injected at clone time to bootstrap the agent software.
+
+## Connection Strategies
+
+- **SSH**: Agents connect outbound to Jenkins via SSH protocol (traditional)
+- **WebSocket**: Agents connect via WebSocket remoting (cloud-native, firewall-friendly)
 
 ## Issues
 
