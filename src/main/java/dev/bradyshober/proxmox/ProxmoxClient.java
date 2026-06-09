@@ -13,6 +13,8 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -43,7 +45,9 @@ public class ProxmoxClient {
 
     private final ProxmoxServerConfig serverConfig;
     private final OkHttpClient httpClient;
-    private final String nodeForVm; // MVP: single node assumption
+    private final String nodeForVm;
+    private final boolean clusterWidePlacement;
+    private final Map<String, String> vmNodeCache;
     private String authToken; // Session token from login
 
     public static final class ProxmoxVmSummary {
@@ -79,6 +83,8 @@ public class ProxmoxClient {
     public ProxmoxClient(ProxmoxServerConfig serverConfig) throws IOException {
         this.serverConfig = serverConfig;
         this.nodeForVm = serverConfig.getNode();
+        this.clusterWidePlacement = serverConfig.isClusterWidePlacement();
+        this.vmNodeCache = new ConcurrentHashMap<>();
 
         // Create HTTP client with SSL verification control
         OkHttpClient.Builder builder = new OkHttpClient.Builder()
@@ -267,14 +273,236 @@ public class ProxmoxClient {
      */
     public String cloneVmWithCloudInit(String sourceVmId, String newVmId, String newVmName, String cloudInitScript)
             throws Exception {
-        String path =
-                String.format("%s/api2/json/nodes/%s/qemu/%s/clone", serverConfig.getHost(), nodeForVm, sourceVmId);
-        FormBody.Builder bodyBuilder = new FormBody.Builder()
-                .add("newid", newVmId)
-                .add("name", newVmName)
-                .add("full", "1");
+        // Clear the cache for the source template to ensure we discover its current node
+        // (handles the case where a template has been moved to another node in the cluster)
+        vmNodeCache.remove(sourceVmId);
 
-        return postRequest(path, bodyBuilder.build());
+        String sourceNode = resolveTemplateNode(sourceVmId);
+        String targetNode = clusterWidePlacement ? selectTargetNodeForProvisioning() : sourceNode;
+
+        String path =
+                String.format("%s/api2/json/nodes/%s/qemu/%s/clone", serverConfig.getHost(), sourceNode, sourceVmId);
+        try {
+            String upid = postRequest(path, buildCloneRequestBody(newVmId, newVmName, targetNode));
+            cacheClonedVmNode(newVmId, targetNode, sourceNode);
+            return upid;
+        } catch (IOException e) {
+            // Handle the case where template was moved but clone failed with local storage error
+            if (shouldRetryCloneOnSourceNode(e, sourceNode, targetNode)) {
+                LOGGER.log(
+                        Level.WARNING,
+                        "Cluster auto-placement selected node ''{0}'', but clone requires local storage on source node ''{1}''; retrying without target",
+                        new Object[] {targetNode, sourceNode});
+                String upid = postRequest(path, buildCloneRequestBody(newVmId, newVmName, null));
+                cacheClonedVmNode(newVmId, sourceNode, sourceNode);
+                return upid;
+            }
+
+            // Handle the case where template configuration file is not found (template moved to different node)
+            if (isTemplateNotFoundError(e)) {
+                LOGGER.log(
+                        Level.WARNING,
+                        "Template VM {0} not found on previously cached node ''{1}''; rediscovering template location and retrying clone",
+                        new Object[] {sourceVmId, sourceNode});
+
+                // Clear cache and force fresh discovery
+                vmNodeCache.remove(sourceVmId);
+                String newSourceNode = resolveTemplateNode(sourceVmId);
+
+                if (!newSourceNode.equals(sourceNode)) {
+                    LOGGER.log(
+                            Level.INFO,
+                            "Template VM {0} found on different node: {1} instead of {2}; retrying clone from new location",
+                            new Object[] {sourceVmId, newSourceNode, sourceNode});
+
+                    String newPath = String.format(
+                            "%s/api2/json/nodes/%s/qemu/%s/clone", serverConfig.getHost(), newSourceNode, sourceVmId);
+                    String upid = postRequest(newPath, buildCloneRequestBody(newVmId, newVmName, targetNode));
+                    cacheClonedVmNode(newVmId, targetNode, newSourceNode);
+                    return upid;
+                }
+            }
+
+            throw e;
+        }
+    }
+
+    private FormBody buildCloneRequestBody(String newVmId, String newVmName, String targetNode) {
+        FormBody.Builder bodyBuilder = new FormBody.Builder().add("newid", newVmId).add("name", newVmName).add("full", "1");
+        if (targetNode != null && !targetNode.isBlank()) {
+            bodyBuilder.add("target", targetNode);
+        }
+        return bodyBuilder.build();
+    }
+
+    private void cacheClonedVmNode(String vmId, String preferredNode, String fallbackNode) {
+        if (vmId == null || vmId.isBlank()) {
+            return;
+        }
+        String effectiveNode = (preferredNode != null && !preferredNode.isBlank()) ? preferredNode : fallbackNode;
+        if (effectiveNode != null && !effectiveNode.isBlank()) {
+            vmNodeCache.put(vmId, effectiveNode);
+        }
+    }
+
+    private boolean shouldRetryCloneOnSourceNode(IOException error, String sourceNode, String targetNode) {
+        if (error == null || sourceNode == null || sourceNode.isBlank()) {
+            return false;
+        }
+
+        String message = error.getMessage();
+        if (message == null || message.isBlank()) {
+            return false;
+        }
+
+        String lower = message.toLowerCase(java.util.Locale.ROOT);
+
+        // Retry if template uses local storage and target was different
+        if (clusterWidePlacement && !sourceNode.equals(targetNode) && targetNode != null && !targetNode.isBlank()) {
+            if (lower.contains("can't clone vm to node") && lower.contains("vm uses local storage")) {
+                return true;
+            }
+        }
+
+        // Retry if config file not found on expected node (template may have been moved)
+        if (lower.contains("unable to find configuration file")) {
+            return true;
+        }
+
+        return false;
+    }
+
+    private boolean isTemplateNotFoundError(IOException error) {
+        if (error == null || error.getMessage() == null) {
+            return false;
+        }
+        String message = error.getMessage().toLowerCase(java.util.Locale.ROOT);
+        return message.contains("unable to find configuration file") || message.contains("no such file or directory");
+    }
+
+    private String resolveTemplateNode(String templateVmId) throws IOException {
+        if (!clusterWidePlacement) {
+            return nodeForVm;
+        }
+        return resolveNodeForVm(templateVmId);
+    }
+
+    private String resolveNodeForVm(String vmId) throws IOException {
+        if (!clusterWidePlacement) {
+            return nodeForVm;
+        }
+        if (vmId != null) {
+            String cachedNode = vmNodeCache.get(vmId);
+            if (cachedNode != null && !cachedNode.isBlank()) {
+                return cachedNode;
+            }
+        }
+
+        String discoveredNode = discoverVmNode(vmId);
+        if (vmId != null && discoveredNode != null && !discoveredNode.isBlank()) {
+            vmNodeCache.put(vmId, discoveredNode);
+        }
+        return discoveredNode;
+    }
+
+    private String discoverVmNode(String vmId) throws IOException {
+        String path = serverConfig.getHost() + "/api2/json/cluster/resources?type=vm";
+        Request request = new Request.Builder()
+                .url(path)
+                .get()
+                .addHeader(AUTHORIZATION_HEADER, authToken)
+                .build();
+
+        try (Response response = httpClient.newCall(request).execute()) {
+            if (!response.isSuccessful()) {
+                okhttp3.ResponseBody body = response.body();
+                String responseBody = body != null ? body.string() : "";
+                throw new IOException("Failed to discover VM node from cluster resources: HTTP " + response.code() + " "
+                        + responseBody);
+            }
+
+            okhttp3.ResponseBody body = response.body();
+            String responseBody = body != null ? body.string() : "{}";
+            JsonObject json = gson.fromJson(responseBody, JsonObject.class);
+            if (json == null || !json.has("data") || !json.get("data").isJsonArray()) {
+                throw new IOException("Cluster resource response did not contain VM data");
+            }
+
+            for (com.google.gson.JsonElement elem : json.getAsJsonArray("data")) {
+                if (elem == null || !elem.isJsonObject()) {
+                    continue;
+                }
+                JsonObject vm = elem.getAsJsonObject();
+                if (!"qemu".equals(readNullableField(vm, "type"))) {
+                    continue;
+                }
+                String candidateVmId = readNullableField(vm, "vmid");
+                if (vmId != null && vmId.equals(candidateVmId)) {
+                    String node = readNullableField(vm, "node");
+                    if (node == null || node.isBlank()) {
+                        break;
+                    }
+                    return node;
+                }
+            }
+        }
+
+        throw new IOException("Unable to resolve Proxmox node for VM " + vmId + " in cluster mode");
+    }
+
+    private String selectTargetNodeForProvisioning() throws IOException {
+        String path = serverConfig.getHost() + "/api2/json/cluster/resources?type=node";
+        Request request = new Request.Builder()
+                .url(path)
+                .get()
+                .addHeader(AUTHORIZATION_HEADER, authToken)
+                .build();
+
+        try (Response response = httpClient.newCall(request).execute()) {
+            if (!response.isSuccessful()) {
+                okhttp3.ResponseBody body = response.body();
+                String responseBody = body != null ? body.string() : "";
+                throw new IOException("Failed to discover Proxmox nodes for auto placement: HTTP " + response.code()
+                        + " " + responseBody);
+            }
+
+            okhttp3.ResponseBody body = response.body();
+            String responseBody = body != null ? body.string() : "{}";
+            JsonObject json = gson.fromJson(responseBody, JsonObject.class);
+            if (json == null || !json.has("data") || !json.get("data").isJsonArray()) {
+                throw new IOException("Cluster node resource response did not contain data");
+            }
+
+            String bestNode = null;
+            double bestCpu = Double.MAX_VALUE;
+            for (com.google.gson.JsonElement elem : json.getAsJsonArray("data")) {
+                if (elem == null || !elem.isJsonObject()) {
+                    continue;
+                }
+                JsonObject node = elem.getAsJsonObject();
+                String status = readNullableField(node, STATUS_FIELD);
+                if (!"online".equalsIgnoreCase(status)) {
+                    continue;
+                }
+                String nodeName = readNullableField(node, "node");
+                if (nodeName == null || nodeName.isBlank()) {
+                    continue;
+                }
+                double cpu = node.has("cpu") && !node.get("cpu").isJsonNull()
+                        ? node.get("cpu").getAsDouble()
+                        : Double.MAX_VALUE;
+                if (cpu < bestCpu) {
+                    bestCpu = cpu;
+                    bestNode = nodeName;
+                }
+            }
+
+            if (bestNode != null && !bestNode.isBlank()) {
+                return bestNode;
+            }
+        }
+
+        throw new IOException("No online Proxmox node found for cluster auto placement");
     }
 
     // -------------------------------------------------------------------------
@@ -288,8 +516,8 @@ public class ProxmoxClient {
      * @throws Exception if the agent does not respond within the timeout
      */
     public void waitForGuestAgent(String vmId) throws Exception {
-        String path =
-                String.format("%s/api2/json/nodes/%s/qemu/%s/agent/ping", serverConfig.getHost(), nodeForVm, vmId);
+        String node = resolveNodeForVm(vmId);
+        String path = String.format("%s/api2/json/nodes/%s/qemu/%s/agent/ping", serverConfig.getHost(), node, vmId);
         int maxAttempts = 60; // 5 minutes
         for (int attempt = 0; attempt < maxAttempts; attempt++) {
             Request request = new Request.Builder()
@@ -322,8 +550,9 @@ public class ProxmoxClient {
      * @throws Exception if the operation fails
      */
     public void writeFileViaGuestAgent(String vmId, String filePath, String content) throws Exception {
-        String path = String.format(
-                "%s/api2/json/nodes/%s/qemu/%s/agent/file-write", serverConfig.getHost(), nodeForVm, vmId);
+        String node = resolveNodeForVm(vmId);
+        String path =
+                String.format("%s/api2/json/nodes/%s/qemu/%s/agent/file-write", serverConfig.getHost(), node, vmId);
         IOException firstError = null;
 
         // Some Proxmox/QGA combinations accept plain text directly.
@@ -389,10 +618,10 @@ public class ProxmoxClient {
      */
     public void execCommandViaGuestAgent(String vmId, String... commandAndArgs) throws Exception {
         validateGuestAgentCommand(commandAndArgs);
-        String execPath =
-                String.format("%s/api2/json/nodes/%s/qemu/%s/agent/exec", serverConfig.getHost(), nodeForVm, vmId);
+        String node = resolveNodeForVm(vmId);
+        String execPath = String.format("%s/api2/json/nodes/%s/qemu/%s/agent/exec", serverConfig.getHost(), node, vmId);
         int pid = startGuestAgentExec(vmId, execPath, commandAndArgs);
-        waitForGuestAgentExecCompletion(vmId, pid, commandAndArgs);
+        waitForGuestAgentExecCompletion(vmId, node, pid, commandAndArgs);
     }
 
     private void validateGuestAgentCommand(String... commandAndArgs) {
@@ -404,9 +633,10 @@ public class ProxmoxClient {
         }
     }
 
-    private void waitForGuestAgentExecCompletion(String vmId, int pid, String... commandAndArgs) throws Exception {
+    private void waitForGuestAgentExecCompletion(String vmId, String node, int pid, String... commandAndArgs)
+            throws Exception {
         String statusPath = String.format(
-                "%s/api2/json/nodes/%s/qemu/%s/agent/exec-status?pid=%d", serverConfig.getHost(), nodeForVm, vmId, pid);
+                "%s/api2/json/nodes/%s/qemu/%s/agent/exec-status?pid=%d", serverConfig.getHost(), node, vmId, pid);
         int maxAttempts = 60;
         for (int attempt = 0; attempt < maxAttempts; attempt++) {
             if (checkGuestAgentExecStatus(statusPath, commandAndArgs)) {
@@ -535,8 +765,16 @@ public class ProxmoxClient {
     }
 
     private boolean isGuestAgentPingSuccessful(String vmId) {
-        String pingPath =
-                String.format("%s/api2/json/nodes/%s/qemu/%s/agent/ping", serverConfig.getHost(), nodeForVm, vmId);
+        String node;
+        try {
+            node = resolveNodeForVm(vmId);
+        } catch (IOException e) {
+            LOGGER.log(Level.FINE, "guest-agent ping node resolution failed for VM {0}: {1}", new Object[] {
+                vmId, e.getMessage()
+            });
+            return false;
+        }
+        String pingPath = String.format("%s/api2/json/nodes/%s/qemu/%s/agent/ping", serverConfig.getHost(), node, vmId);
         Request request = new Request.Builder()
                 .url(pingPath)
                 .post(new FormBody.Builder().build())
@@ -585,8 +823,8 @@ public class ProxmoxClient {
      * @throws Exception if the start operation fails
      */
     public String startVm(String vmId) throws Exception {
-        String path =
-                String.format("%s/api2/json/nodes/%s/qemu/%s/status/start", serverConfig.getHost(), nodeForVm, vmId);
+        String path = String.format(
+                "%s/api2/json/nodes/%s/qemu/%s/status/start", serverConfig.getHost(), resolveNodeForVm(vmId), vmId);
 
         return postRequest(path, new FormBody.Builder().build());
     }
@@ -599,8 +837,8 @@ public class ProxmoxClient {
      * @throws Exception if the stop operation fails
      */
     public String stopVm(String vmId) throws Exception {
-        String path =
-                String.format("%s/api2/json/nodes/%s/qemu/%s/status/stop", serverConfig.getHost(), nodeForVm, vmId);
+        String path = String.format(
+                "%s/api2/json/nodes/%s/qemu/%s/status/stop", serverConfig.getHost(), resolveNodeForVm(vmId), vmId);
 
         return postRequest(path, new FormBody.Builder().build());
     }
@@ -613,7 +851,8 @@ public class ProxmoxClient {
      * @throws Exception if the delete operation fails
      */
     public String deleteVm(String vmId) throws Exception {
-        String path = String.format("%s/api2/json/nodes/%s/qemu/%s", serverConfig.getHost(), nodeForVm, vmId);
+        String path =
+                String.format("%s/api2/json/nodes/%s/qemu/%s", serverConfig.getHost(), resolveNodeForVm(vmId), vmId);
 
         Request request = new Request.Builder()
                 .url(path)
@@ -633,6 +872,7 @@ public class ProxmoxClient {
             JsonObject jsonResponse = gson.fromJson(responseBody, JsonObject.class);
 
             if (jsonResponse != null && jsonResponse.has("data")) {
+                vmNodeCache.remove(vmId);
                 return jsonResponse.get("data").getAsString();
             }
             throw new Exception("No UPID returned from delete operation");
@@ -643,6 +883,10 @@ public class ProxmoxClient {
      * List QEMU VMs on the configured Proxmox node.
      */
     public List<ProxmoxVmSummary> listNodeVms() throws IOException {
+        if (clusterWidePlacement) {
+            return listClusterVms();
+        }
+
         String path = String.format("%s/api2/json/nodes/%s/qemu", serverConfig.getHost(), nodeForVm);
         Request request = new Request.Builder()
                 .url(path)
@@ -661,6 +905,63 @@ public class ProxmoxClient {
             String responseBody = body != null ? body.string() : "{}";
             return parseVmSummaries(responseBody);
         }
+    }
+
+    private List<ProxmoxVmSummary> listClusterVms() throws IOException {
+        String path = serverConfig.getHost() + "/api2/json/cluster/resources?type=vm";
+        Request request = new Request.Builder()
+                .url(path)
+                .get()
+                .addHeader(AUTHORIZATION_HEADER, authToken)
+                .build();
+
+        try (Response response = httpClient.newCall(request).execute()) {
+            if (!response.isSuccessful()) {
+                okhttp3.ResponseBody body = response.body();
+                String responseBody = body != null ? body.string() : "";
+                throw new IOException("Failed to list cluster VMs: HTTP " + response.code() + " " + responseBody);
+            }
+
+            okhttp3.ResponseBody body = response.body();
+            String responseBody = body != null ? body.string() : "{}";
+            return parseClusterVmSummaries(responseBody);
+        }
+    }
+
+    private List<ProxmoxVmSummary> parseClusterVmSummaries(String responseBody) {
+        JsonObject json = gson.fromJson(responseBody, JsonObject.class);
+        List<ProxmoxVmSummary> vms = new ArrayList<>();
+        if (json == null || !json.has("data") || !json.get("data").isJsonArray()) {
+            return vms;
+        }
+
+        for (com.google.gson.JsonElement elem : json.getAsJsonArray("data")) {
+            ProxmoxVmSummary summary = parseClusterVmSummary(elem);
+            if (summary != null) {
+                vms.add(summary);
+                if (summary.getVmId() != null) {
+                    JsonObject vm = elem.getAsJsonObject();
+                    String node = readNullableField(vm, "node");
+                    if (node != null && !node.isBlank()) {
+                        vmNodeCache.put(summary.getVmId(), node);
+                    }
+                }
+            }
+        }
+        return vms;
+    }
+
+    private ProxmoxVmSummary parseClusterVmSummary(com.google.gson.JsonElement elem) {
+        if (elem == null || !elem.isJsonObject()) {
+            return null;
+        }
+
+        JsonObject vm = elem.getAsJsonObject();
+        if (!"qemu".equals(readNullableField(vm, "type"))) {
+            return null;
+        }
+
+        return parseVmSummary(elem);
     }
 
     private List<ProxmoxVmSummary> parseVmSummaries(String responseBody) {
@@ -797,6 +1098,24 @@ public class ProxmoxClient {
     }
 
     /**
+     * Clear the VM node cache. This forces the next VM operation to rediscover
+     * where the VM is located in the cluster. Useful when a VM has been moved
+     * to a different node after being cached.
+     *
+     * @param vmId VM ID to clear from cache, or null to clear all cached entries
+     */
+    public void clearVmNodeCache(String vmId) {
+        if (vmId == null) {
+            vmNodeCache.clear();
+            LOGGER.log(Level.FINE, "Cleared all VM node cache entries");
+        } else {
+            if (vmNodeCache.remove(vmId) != null) {
+                LOGGER.log(Level.FINE, "Cleared VM node cache entry for VM {0}", vmId);
+            }
+        }
+    }
+
+    /**
      * Make a POST request to the Proxmox API.
      */
     private String postRequest(String path, okhttp3.RequestBody body) throws IOException {
@@ -850,8 +1169,9 @@ public class ProxmoxClient {
      * @throws Exception if the address cannot be resolved within the timeout
      */
     public String getVmIpAddress(String vmId) throws Exception {
+        String node = resolveNodeForVm(vmId);
         String path = String.format(
-                "%s/api2/json/nodes/%s/qemu/%s/agent/network-get-interfaces", serverConfig.getHost(), nodeForVm, vmId);
+                "%s/api2/json/nodes/%s/qemu/%s/agent/network-get-interfaces", serverConfig.getHost(), node, vmId);
 
         int maxAttempts = 60; // 5 minutes with 5-second polls
         for (int attempt = 0; attempt < maxAttempts; attempt++) {
@@ -959,7 +1279,8 @@ public class ProxmoxClient {
      * @throws Exception if the configuration request or task wait fails
      */
     public void configureVmCloudInit(String vmId, String ciUser, String sshPublicKey, String tags) throws Exception {
-        String path = String.format("%s/api2/json/nodes/%s/qemu/%s/config", serverConfig.getHost(), nodeForVm, vmId);
+        String path = String.format(
+                "%s/api2/json/nodes/%s/qemu/%s/config", serverConfig.getHost(), resolveNodeForVm(vmId), vmId);
 
         String normalizedSshKey = null;
         if (sshPublicKey != null && !sshPublicKey.isBlank()) {

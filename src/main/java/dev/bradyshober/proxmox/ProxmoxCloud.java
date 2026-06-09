@@ -59,6 +59,7 @@ public class ProxmoxCloud extends Cloud {
     private final ProxmoxServerConfig serverConfig;
     private final ProxmoxAgentTemplate agentTemplate;
     private final List<ProxmoxInstance> instances;
+    private boolean autoSelectNode;
     private transient ProxmoxClient proxmoxClient;
     /** Tracks async provisions in-flight so the reconciler doesn't over-provision. */
     private transient AtomicInteger pendingProvisions;
@@ -113,6 +114,7 @@ public class ProxmoxCloud extends Cloud {
         super(name);
         this.serverConfig = new ProxmoxServerConfig(
                 host, apiTokenCredentialId, !skipTlsVerification, node == null || node.isBlank() ? "pve" : node);
+        this.autoSelectNode = false;
 
         ComputerConnector configuredConnector = computerConnector != null ? computerConnector : defaultConnector();
 
@@ -148,6 +150,7 @@ public class ProxmoxCloud extends Cloud {
     private Object readResolve() {
         proxmoxClient = null;
         startupReconciled = false;
+        serverConfig.setClusterWidePlacement(autoSelectNode);
         initTransientState();
         return this;
     }
@@ -164,9 +167,11 @@ public class ProxmoxCloud extends Cloud {
         String host = serverConfig.getHost() == null
                 ? ""
                 : serverConfig.getHost().trim().toLowerCase(Locale.ROOT);
-        String node = serverConfig.getNode() == null
-                ? ""
-                : serverConfig.getNode().trim().toLowerCase(Locale.ROOT);
+        String node = autoSelectNode
+                ? "cluster-auto"
+                : (serverConfig.getNode() == null
+                        ? ""
+                        : serverConfig.getNode().trim().toLowerCase(Locale.ROOT));
         return host + "|" + node;
     }
 
@@ -1074,6 +1079,17 @@ public class ProxmoxCloud extends Cloud {
 
     public String getNode() {
         return serverConfig.getNode();
+    }
+
+    public boolean isAutoSelectNode() {
+        return autoSelectNode;
+    }
+
+    @DataBoundSetter
+    public void setAutoSelectNode(boolean autoSelectNode) {
+        this.autoSelectNode = autoSelectNode;
+        serverConfig.setClusterWidePlacement(autoSelectNode);
+        proxmoxClient = null;
     }
 
     public String getApiTokenCredentialId() {

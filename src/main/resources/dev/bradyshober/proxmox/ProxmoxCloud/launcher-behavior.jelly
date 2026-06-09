@@ -25,6 +25,12 @@
         return null;
     }
 
+    function findAutoSelectNodeCheckbox() {
+        return document.querySelector(
+            'input[type="checkbox"][name$=".autoSelectNode"], input[type="checkbox"][name="autoSelectNode"], input[type="checkbox"][name$="autoSelectNode"]'
+        );
+    }
+
     // Control SSH field visibility based on connector selection
     function updateSSHVisibility() {
         var sshFieldsWrapper = document.querySelector('[data-ssh-fields="true"]');
@@ -45,13 +51,29 @@
         sshFieldsWrapper.style.display = isSsh ? '' : 'none';
     }
 
+    function updateNodeFieldVisibility() {
+        var nodeFieldWrapper = document.querySelector('[data-node-field="true"]');
+        if (!nodeFieldWrapper) {
+            return;
+        }
+
+        var autoSelectNodeCheckbox = findAutoSelectNodeCheckbox();
+        if (!autoSelectNodeCheckbox) {
+            return;
+        }
+
+        nodeFieldWrapper.style.display = autoSelectNodeCheckbox.checked ? 'none' : '';
+    }
+
     // Call on DOMContentLoaded
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', function() {
             setTimeout(updateSSHVisibility, 200);
+            setTimeout(updateNodeFieldVisibility, 200);
         });
     } else {
         setTimeout(updateSSHVisibility, 200);
+        setTimeout(updateNodeFieldVisibility, 200);
     }
 
     // Set up change listeners after jelly controls render
@@ -62,7 +84,14 @@
                 updateSSHVisibility();
             });
         }
+        var autoSelectNodeCheckbox = findAutoSelectNodeCheckbox();
+        if (autoSelectNodeCheckbox) {
+            autoSelectNodeCheckbox.addEventListener('change', function() {
+                updateNodeFieldVisibility();
+            });
+        }
         updateSSHVisibility();
+        updateNodeFieldVisibility();
     }, 300);
     ]]></script>
 </j:jelly>

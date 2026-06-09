@@ -63,6 +63,10 @@ class ProxmoxClientTest {
         return new ProxmoxServerConfig(baseUrl, CRED_ID, verifySsl, "pve");
     }
 
+    private ProxmoxServerConfig clusterServerConfig(boolean verifySsl) {
+        return new ProxmoxServerConfig(baseUrl, CRED_ID, verifySsl, "pve", true);
+    }
+
     private Object invokePrivate(ProxmoxClient client, String methodName, Class<?>[] parameterTypes, Object... args)
             throws Exception {
         Method method = ProxmoxClient.class.getDeclaredMethod(methodName, parameterTypes);
@@ -358,6 +362,80 @@ class ProxmoxClientTest {
     }
 
     @Test
+    void testCloneVmWithCloudInitUsesClusterAutoPlacementWhenEnabled(JenkinsRule j) throws Exception {
+        addCredential(j);
+        enqueueVersionOk();
+        mockWebServer.enqueue(new MockResponse()
+                .setResponseCode(200)
+                .setBody("{\"data\":[{\"type\":\"qemu\",\"vmid\":100,\"node\":\"pve-a\"}]}"));
+        mockWebServer.enqueue(new MockResponse()
+                .setResponseCode(200)
+                .setBody("{\"data\":["
+                        + "{\"type\":\"node\",\"node\":\"pve-a\",\"status\":\"online\",\"cpu\":0.8},"
+                        + "{\"type\":\"node\",\"node\":\"pve-b\",\"status\":\"online\",\"cpu\":0.2}"
+                        + "]}"));
+        mockWebServer.enqueue(new MockResponse()
+                .setResponseCode(200)
+                .setBody("{\"data\":\"UPID:pve-b:0004:0004:0004:qmclone:910:root@pam:\"}"));
+
+        ProxmoxClient client = new ProxmoxClient(clusterServerConfig(false));
+        String upid = client.cloneVmWithCloudInit("100", "910", "agent-910", null);
+        assertTrue(upid.contains("qmclone"));
+
+        mockWebServer.takeRequest(); // version
+        RecordedRequest vmDiscover = mockWebServer.takeRequest();
+        RecordedRequest nodeDiscover = mockWebServer.takeRequest();
+        RecordedRequest cloneRequest = mockWebServer.takeRequest();
+
+        assertEquals("/api2/json/cluster/resources?type=vm", vmDiscover.getPath());
+        assertEquals("/api2/json/cluster/resources?type=node", nodeDiscover.getPath());
+        assertEquals("/api2/json/nodes/pve-a/qemu/100/clone", cloneRequest.getPath());
+        assertTrue(cloneRequest.getBody().readUtf8().contains("target=pve-b"));
+    }
+
+    @Test
+    void testCloneVmWithCloudInitFallsBackToSourceNodeWhenLocalStorageBlocksTarget(JenkinsRule j) throws Exception {
+        addCredential(j);
+        enqueueVersionOk();
+        mockWebServer.enqueue(new MockResponse()
+                .setResponseCode(200)
+                .setBody("{\"data\":[{\"type\":\"qemu\",\"vmid\":100,\"node\":\"pve-a\"}]}"));
+        mockWebServer.enqueue(new MockResponse()
+                .setResponseCode(200)
+                .setBody("{\"data\":["
+                        + "{\"type\":\"node\",\"node\":\"pve-a\",\"status\":\"online\",\"cpu\":0.8},"
+                        + "{\"type\":\"node\",\"node\":\"pve-b\",\"status\":\"online\",\"cpu\":0.2}"
+                        + "]}"));
+        mockWebServer.enqueue(new MockResponse()
+                .setResponseCode(500)
+                .setBody("{\"data\":null,\"message\":\"can't clone VM to node 'pve-b' (VM uses local storage)\\n\"}"));
+        mockWebServer.enqueue(new MockResponse()
+                .setResponseCode(200)
+                .setBody("{\"data\":\"UPID:pve-a:0004:0004:0004:qmclone:911:root@pam:\"}"));
+        mockWebServer.enqueue(new MockResponse().setResponseCode(200).setBody("{\"data\":\"UPID:start\"}"));
+
+        ProxmoxClient client = new ProxmoxClient(clusterServerConfig(false));
+        String upid = client.cloneVmWithCloudInit("100", "911", "agent-911", null);
+        assertTrue(upid.contains("qmclone"));
+        assertEquals("UPID:start", client.startVm("911"));
+
+        mockWebServer.takeRequest(); // version
+        mockWebServer.takeRequest(); // discover template vm node
+        mockWebServer.takeRequest(); // discover cluster target node
+        RecordedRequest firstCloneRequest = mockWebServer.takeRequest();
+        RecordedRequest secondCloneRequest = mockWebServer.takeRequest();
+        RecordedRequest startRequest = mockWebServer.takeRequest();
+
+        String firstCloneBody = firstCloneRequest.getBody().readUtf8();
+        String secondCloneBody = secondCloneRequest.getBody().readUtf8();
+        assertTrue(firstCloneBody.contains("target=pve-b"));
+        assertFalse(secondCloneBody.contains("target="));
+        assertEquals("/api2/json/nodes/pve-a/qemu/100/clone", firstCloneRequest.getPath());
+        assertEquals("/api2/json/nodes/pve-a/qemu/100/clone", secondCloneRequest.getPath());
+        assertEquals("/api2/json/nodes/pve-a/qemu/911/status/start", startRequest.getPath());
+    }
+
+    @Test
     void testStartVmAndStopVmReturnTaskUpids(JenkinsRule j) throws Exception {
         addCredential(j);
         enqueueVersionOk();
@@ -373,6 +451,47 @@ class ProxmoxClientTest {
         RecordedRequest stopRequest = mockWebServer.takeRequest();
         assertEquals("/api2/json/nodes/pve/qemu/920/status/start", startRequest.getPath());
         assertEquals("/api2/json/nodes/pve/qemu/920/status/stop", stopRequest.getPath());
+    }
+
+    @Test
+    void testStartVmResolvesVmNodeFromClusterInAutoPlacementMode(JenkinsRule j) throws Exception {
+        addCredential(j);
+        enqueueVersionOk();
+        mockWebServer.enqueue(new MockResponse()
+                .setResponseCode(200)
+                .setBody("{\"data\":[{\"type\":\"qemu\",\"vmid\":920,\"node\":\"pve-z\"}]}"));
+        mockWebServer.enqueue(new MockResponse().setResponseCode(200).setBody("{\"data\":\"UPID:start\"}"));
+
+        ProxmoxClient client = new ProxmoxClient(clusterServerConfig(false));
+        assertEquals("UPID:start", client.startVm("920"));
+
+        mockWebServer.takeRequest(); // version
+        RecordedRequest discover = mockWebServer.takeRequest();
+        RecordedRequest start = mockWebServer.takeRequest();
+        assertEquals("/api2/json/cluster/resources?type=vm", discover.getPath());
+        assertEquals("/api2/json/nodes/pve-z/qemu/920/status/start", start.getPath());
+    }
+
+    @Test
+    void testListNodeVmsReadsClusterResourcesWhenAutoPlacementEnabled(JenkinsRule j) throws Exception {
+        addCredential(j);
+        enqueueVersionOk();
+        mockWebServer.enqueue(new MockResponse()
+                .setResponseCode(200)
+                .setBody("{\"data\":["
+                        + "{\"type\":\"qemu\",\"vmid\":200,\"name\":\"agent-1\",\"status\":\"running\",\"tags\":\"t1\",\"node\":\"pve-a\"},"
+                        + "{\"type\":\"lxc\",\"vmid\":201,\"name\":\"ct-1\",\"status\":\"running\"}"
+                        + "]}"));
+
+        ProxmoxClient client = new ProxmoxClient(clusterServerConfig(false));
+        java.util.List<ProxmoxClient.ProxmoxVmSummary> vms = client.listNodeVms();
+
+        assertEquals(1, vms.size());
+        assertEquals("200", vms.get(0).getVmId());
+
+        mockWebServer.takeRequest(); // version
+        RecordedRequest listRequest = mockWebServer.takeRequest();
+        assertEquals("/api2/json/cluster/resources?type=vm", listRequest.getPath());
     }
 
     @Test
