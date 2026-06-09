@@ -328,7 +328,10 @@ public class ProxmoxClient {
     }
 
     private FormBody buildCloneRequestBody(String newVmId, String newVmName, String targetNode) {
-        FormBody.Builder bodyBuilder = new FormBody.Builder().add("newid", newVmId).add("name", newVmName).add("full", "1");
+        FormBody.Builder bodyBuilder = new FormBody.Builder()
+                .add("newid", newVmId)
+                .add("name", newVmName)
+                .add("full", "1");
         if (targetNode != null && !targetNode.isBlank()) {
             bodyBuilder.add("target", targetNode);
         }
