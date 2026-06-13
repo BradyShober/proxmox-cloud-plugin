@@ -167,11 +167,14 @@ public class ProxmoxCloud extends Cloud {
         String host = serverConfig.getHost() == null
                 ? ""
                 : serverConfig.getHost().trim().toLowerCase(Locale.ROOT);
-        String node = autoSelectNode
-                ? "cluster-auto"
-                : (serverConfig.getNode() == null
-                        ? ""
-                        : serverConfig.getNode().trim().toLowerCase(Locale.ROOT));
+        String node;
+        if (autoSelectNode) {
+            node = "cluster-auto";
+        } else {
+            node = serverConfig.getNode() == null
+                    ? ""
+                    : serverConfig.getNode().trim().toLowerCase(Locale.ROOT);
+        }
         return host + "|" + node;
     }
 

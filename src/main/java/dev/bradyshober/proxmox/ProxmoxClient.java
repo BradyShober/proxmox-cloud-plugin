@@ -3,6 +3,7 @@ package dev.bradyshober.proxmox;
 import com.cloudbees.plugins.credentials.CredentialsMatchers;
 import com.cloudbees.plugins.credentials.CredentialsProvider;
 import com.google.gson.Gson;
+import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import hudson.security.ACL;
 import java.io.IOException;
@@ -328,7 +329,10 @@ public class ProxmoxClient {
     }
 
     private FormBody buildCloneRequestBody(String newVmId, String newVmName, String targetNode) {
-        FormBody.Builder bodyBuilder = new FormBody.Builder().add("newid", newVmId).add("name", newVmName).add("full", "1");
+        FormBody.Builder bodyBuilder = new FormBody.Builder()
+                .add("newid", newVmId)
+                .add("name", newVmName)
+                .add("full", "1");
         if (targetNode != null && !targetNode.isBlank()) {
             bodyBuilder.add("target", targetNode);
         }
@@ -357,15 +361,9 @@ public class ProxmoxClient {
 
         String lower = message.toLowerCase(java.util.Locale.ROOT);
 
-        // Retry if template uses local storage and target was different
-        if (clusterWidePlacement && !sourceNode.equals(targetNode) && targetNode != null && !targetNode.isBlank()) {
-            if (lower.contains("can't clone vm to node") && lower.contains("vm uses local storage")) {
-                return true;
-            }
-        }
-
-        // Retry if config file not found on expected node (template may have been moved)
-        if (lower.contains("unable to find configuration file")) {
+        boolean hasDifferentTarget =
+                clusterWidePlacement && targetNode != null && !targetNode.isBlank() && !sourceNode.equals(targetNode);
+        if (hasDifferentTarget && lower.contains("can't clone vm to node") && lower.contains("vm uses local storage")) {
             return true;
         }
 
@@ -406,43 +404,21 @@ public class ProxmoxClient {
     }
 
     private String discoverVmNode(String vmId) throws IOException {
-        String path = serverConfig.getHost() + "/api2/json/cluster/resources?type=vm";
-        Request request = new Request.Builder()
-                .url(path)
-                .get()
-                .addHeader(AUTHORIZATION_HEADER, authToken)
-                .build();
+        JsonArray resources = fetchClusterResourceData(
+                "vm",
+                "Failed to discover VM node from cluster resources",
+                "Cluster resource response did not contain VM data");
 
-        try (Response response = httpClient.newCall(request).execute()) {
-            if (!response.isSuccessful()) {
-                okhttp3.ResponseBody body = response.body();
-                String responseBody = body != null ? body.string() : "";
-                throw new IOException("Failed to discover VM node from cluster resources: HTTP " + response.code() + " "
-                        + responseBody);
-            }
-
-            okhttp3.ResponseBody body = response.body();
-            String responseBody = body != null ? body.string() : "{}";
-            JsonObject json = gson.fromJson(responseBody, JsonObject.class);
-            if (json == null || !json.has("data") || !json.get("data").isJsonArray()) {
-                throw new IOException("Cluster resource response did not contain VM data");
-            }
-
-            for (com.google.gson.JsonElement elem : json.getAsJsonArray("data")) {
-                if (elem == null || !elem.isJsonObject()) {
-                    continue;
-                }
-                JsonObject vm = elem.getAsJsonObject();
-                if (!"qemu".equals(readNullableField(vm, "type"))) {
-                    continue;
-                }
+        for (com.google.gson.JsonElement elem : resources) {
+            JsonObject vm = toJsonObject(elem);
+            if (vm != null && "qemu".equals(readNullableField(vm, "type"))) {
                 String candidateVmId = readNullableField(vm, "vmid");
                 if (vmId != null && vmId.equals(candidateVmId)) {
                     String node = readNullableField(vm, "node");
-                    if (node == null || node.isBlank()) {
-                        break;
+                    if (node != null && !node.isBlank()) {
+                        return node;
                     }
-                    return node;
+                    break;
                 }
             }
         }
@@ -451,7 +427,39 @@ public class ProxmoxClient {
     }
 
     private String selectTargetNodeForProvisioning() throws IOException {
-        String path = serverConfig.getHost() + "/api2/json/cluster/resources?type=node";
+        JsonArray resources = fetchClusterResourceData(
+                "node",
+                "Failed to discover Proxmox nodes for auto placement",
+                "Cluster node resource response did not contain data");
+
+        String bestNode = null;
+        double bestCpu = Double.MAX_VALUE;
+        for (com.google.gson.JsonElement elem : resources) {
+            JsonObject node = toJsonObject(elem);
+            if (node != null) {
+                String status = readNullableField(node, STATUS_FIELD);
+                String nodeName = readNullableField(node, "node");
+                if ("online".equalsIgnoreCase(status) && nodeName != null && !nodeName.isBlank()) {
+                    double cpu = node.has("cpu") && !node.get("cpu").isJsonNull()
+                            ? node.get("cpu").getAsDouble()
+                            : Double.MAX_VALUE;
+                    if (cpu < bestCpu) {
+                        bestCpu = cpu;
+                        bestNode = nodeName;
+                    }
+                }
+            }
+        }
+
+        if (bestNode != null && !bestNode.isBlank()) {
+            return bestNode;
+        }
+        throw new IOException("No online Proxmox node found for cluster auto placement");
+    }
+
+    private JsonArray fetchClusterResourceData(String type, String failureMessage, String missingDataMessage)
+            throws IOException {
+        String path = serverConfig.getHost() + "/api2/json/cluster/resources?type=" + type;
         Request request = new Request.Builder()
                 .url(path)
                 .get()
@@ -462,47 +470,24 @@ public class ProxmoxClient {
             if (!response.isSuccessful()) {
                 okhttp3.ResponseBody body = response.body();
                 String responseBody = body != null ? body.string() : "";
-                throw new IOException("Failed to discover Proxmox nodes for auto placement: HTTP " + response.code()
-                        + " " + responseBody);
+                throw new IOException(failureMessage + ": HTTP " + response.code() + " " + responseBody);
             }
 
             okhttp3.ResponseBody body = response.body();
             String responseBody = body != null ? body.string() : "{}";
             JsonObject json = gson.fromJson(responseBody, JsonObject.class);
             if (json == null || !json.has("data") || !json.get("data").isJsonArray()) {
-                throw new IOException("Cluster node resource response did not contain data");
+                throw new IOException(missingDataMessage);
             }
-
-            String bestNode = null;
-            double bestCpu = Double.MAX_VALUE;
-            for (com.google.gson.JsonElement elem : json.getAsJsonArray("data")) {
-                if (elem == null || !elem.isJsonObject()) {
-                    continue;
-                }
-                JsonObject node = elem.getAsJsonObject();
-                String status = readNullableField(node, STATUS_FIELD);
-                if (!"online".equalsIgnoreCase(status)) {
-                    continue;
-                }
-                String nodeName = readNullableField(node, "node");
-                if (nodeName == null || nodeName.isBlank()) {
-                    continue;
-                }
-                double cpu = node.has("cpu") && !node.get("cpu").isJsonNull()
-                        ? node.get("cpu").getAsDouble()
-                        : Double.MAX_VALUE;
-                if (cpu < bestCpu) {
-                    bestCpu = cpu;
-                    bestNode = nodeName;
-                }
-            }
-
-            if (bestNode != null && !bestNode.isBlank()) {
-                return bestNode;
-            }
+            return json.getAsJsonArray("data");
         }
+    }
 
-        throw new IOException("No online Proxmox node found for cluster auto placement");
+    private JsonObject toJsonObject(com.google.gson.JsonElement elem) {
+        if (elem == null || !elem.isJsonObject()) {
+            return null;
+        }
+        return elem.getAsJsonObject();
     }
 
     // -------------------------------------------------------------------------
@@ -875,7 +860,7 @@ public class ProxmoxClient {
                 vmNodeCache.remove(vmId);
                 return jsonResponse.get("data").getAsString();
             }
-            throw new Exception("No UPID returned from delete operation");
+            throw new IOException("No UPID returned from delete operation");
         }
     }
 

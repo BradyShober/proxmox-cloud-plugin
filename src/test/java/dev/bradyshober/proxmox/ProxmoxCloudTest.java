@@ -1017,7 +1017,7 @@ public class ProxmoxCloudTest {
     }
 
     @Test
-    public void testVmAllocationScopeKeyUsesClusterScopeWhenAutoSelectEnabled() throws Exception {
+    void testVmAllocationScopeKeyUsesClusterScopeWhenAutoSelectEnabled() throws Exception {
         proxmoxCloud.getServerConfig().setHost("https://proxmox.example.com:8006");
         proxmoxCloud.getServerConfig().setNode("pve");
         proxmoxCloud.setAutoSelectNode(true);

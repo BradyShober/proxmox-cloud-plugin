@@ -436,6 +436,81 @@ class ProxmoxClientTest {
     }
 
     @Test
+    void testCloneVmWithCloudInitRetriesWhenTemplateMovedAcrossNodes(JenkinsRule j) throws Exception {
+        addCredential(j);
+        enqueueVersionOk();
+        mockWebServer.enqueue(new MockResponse()
+                .setResponseCode(200)
+                .setBody("{\"data\":[{\"type\":\"qemu\",\"vmid\":100,\"node\":\"pve-a\"}]}"));
+        mockWebServer.enqueue(new MockResponse()
+                .setResponseCode(200)
+                .setBody("{\"data\":["
+                        + "{\"type\":\"node\",\"node\":\"pve-a\",\"status\":\"online\",\"cpu\":0.8},"
+                        + "{\"type\":\"node\",\"node\":\"pve-b\",\"status\":\"online\",\"cpu\":0.2}"
+                        + "]}"));
+        mockWebServer.enqueue(
+                new MockResponse()
+                        .setResponseCode(500)
+                        .setBody(
+                                "{\"data\":null,\"message\":\"unable to find configuration file '/etc/pve/nodes/pve-a/qemu-server/100.conf'\"}"));
+        mockWebServer.enqueue(new MockResponse()
+                .setResponseCode(200)
+                .setBody("{\"data\":[{\"type\":\"qemu\",\"vmid\":100,\"node\":\"pve-c\"}]}"));
+        mockWebServer.enqueue(new MockResponse()
+                .setResponseCode(200)
+                .setBody("{\"data\":\"UPID:pve-c:0004:0004:0004:qmclone:912:root@pam:\"}"));
+
+        ProxmoxClient client = new ProxmoxClient(clusterServerConfig(false));
+        String upid = client.cloneVmWithCloudInit("100", "912", "agent-912", null);
+        assertTrue(upid.contains("qmclone"));
+
+        mockWebServer.takeRequest(); // version
+        mockWebServer.takeRequest(); // initial template lookup
+        mockWebServer.takeRequest(); // target node selection
+        RecordedRequest firstCloneRequest = mockWebServer.takeRequest();
+        RecordedRequest secondTemplateLookup = mockWebServer.takeRequest();
+        RecordedRequest secondCloneRequest = mockWebServer.takeRequest();
+
+        assertEquals("/api2/json/nodes/pve-a/qemu/100/clone", firstCloneRequest.getPath());
+        assertEquals("/api2/json/cluster/resources?type=vm", secondTemplateLookup.getPath());
+        assertEquals("/api2/json/nodes/pve-c/qemu/100/clone", secondCloneRequest.getPath());
+        assertTrue(secondCloneRequest.getBody().readUtf8().contains("target=pve-b"));
+    }
+
+    @Test
+    void testCloneVmWithCloudInitThrowsWhenClusterVmDiscoveryHasNoData(JenkinsRule j) throws Exception {
+        addCredential(j);
+        enqueueVersionOk();
+        mockWebServer.enqueue(new MockResponse().setResponseCode(200).setBody("{}"));
+
+        ProxmoxClient client = new ProxmoxClient(clusterServerConfig(false));
+        IOException ex =
+                assertThrows(IOException.class, () -> client.cloneVmWithCloudInit("100", "913", "agent-913", null));
+        assertTrue(ex.getMessage().contains("VM data"));
+    }
+
+    @Test
+    void testCloneVmWithCloudInitThrowsWhenNoOnlineNodeAvailable(JenkinsRule j) throws Exception {
+        addCredential(j);
+        enqueueVersionOk();
+        mockWebServer.enqueue(new MockResponse()
+                .setResponseCode(200)
+                .setBody("{\"data\":[{\"type\":\"qemu\",\"vmid\":100,\"node\":\"pve-a\"}]}"));
+        mockWebServer.enqueue(new MockResponse()
+                .setResponseCode(200)
+                .setBody("{\"data\":["
+                        + "{\"type\":\"node\",\"node\":\"pve-a\",\"status\":\"offline\",\"cpu\":0.1},"
+                        + "{\"type\":\"node\",\"status\":\"online\",\"cpu\":0.2},"
+                        + "{\"type\":\"node\",\"node\":\"\",\"status\":\"online\",\"cpu\":0.3}"
+                        + "]}"));
+
+        ProxmoxClient client = new ProxmoxClient(clusterServerConfig(false));
+        IOException ex =
+                assertThrows(IOException.class, () -> client.cloneVmWithCloudInit("100", "914", "agent-914", null));
+        assertTrue(ex.getMessage().contains("No online Proxmox node found"));
+    }
+
+    @Test
     void testStartVmAndStopVmReturnTaskUpids(JenkinsRule j) throws Exception {
         addCredential(j);
         enqueueVersionOk();
