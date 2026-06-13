@@ -1000,6 +1000,7 @@ public class ProxmoxCloudTest {
     @Test
     public void testAdditionalCloudGettersAndSetters() {
         assertEquals("pve", proxmoxCloud.getNode());
+        assertFalse(proxmoxCloud.isAutoSelectNode());
         assertTrue(proxmoxCloud.isVerifySsl());
         assertEquals("100", proxmoxCloud.getTemplateVmId());
         assertEquals("proxmox-agent", proxmoxCloud.getAgentNameTemplate());
@@ -1009,6 +1010,22 @@ public class ProxmoxCloudTest {
 
         proxmoxCloud.setNumExecutors(3);
         assertEquals(3, proxmoxCloud.getNumExecutors());
+
+        proxmoxCloud.setAutoSelectNode(true);
+        assertTrue(proxmoxCloud.isAutoSelectNode());
+        assertTrue(proxmoxCloud.getServerConfig().isClusterWidePlacement());
+    }
+
+    @Test
+    void testVmAllocationScopeKeyUsesClusterScopeWhenAutoSelectEnabled() throws Exception {
+        proxmoxCloud.getServerConfig().setHost("https://proxmox.example.com:8006");
+        proxmoxCloud.getServerConfig().setNode("pve");
+        proxmoxCloud.setAutoSelectNode(true);
+
+        Method method = ProxmoxCloud.class.getDeclaredMethod("getVmAllocationScopeKey");
+        method.setAccessible(true);
+
+        assertEquals("https://proxmox.example.com:8006|cluster-auto", method.invoke(proxmoxCloud));
     }
 
     @Test

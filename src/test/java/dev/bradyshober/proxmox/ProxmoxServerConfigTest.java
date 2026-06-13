@@ -19,6 +19,15 @@ class ProxmoxServerConfigTest {
         assertEquals("my-token-cred", config.getApiTokenCredentialId());
         assertTrue(config.isVerifySsl());
         assertEquals("pve", config.getNode());
+        assertFalse(config.isClusterWidePlacement());
+    }
+
+    @Test
+    void testConstructorCanEnableClusterWidePlacement() {
+        ProxmoxServerConfig config =
+                new ProxmoxServerConfig("https://proxmox.example.com:8006", "my-token-cred", true, "pve", true);
+
+        assertTrue(config.isClusterWidePlacement());
     }
 
     @Test
@@ -64,5 +73,12 @@ class ProxmoxServerConfigTest {
         assertNull(config.getHost());
         assertNull(config.getApiTokenCredentialId());
         assertNull(config.getNode());
+    }
+
+    @Test
+    void testSetClusterWidePlacement() {
+        ProxmoxServerConfig config = new ProxmoxServerConfig("https://host", "cred", true, "pve");
+        config.setClusterWidePlacement(true);
+        assertTrue(config.isClusterWidePlacement());
     }
 }

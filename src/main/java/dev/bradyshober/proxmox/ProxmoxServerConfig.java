@@ -14,12 +14,19 @@ public class ProxmoxServerConfig implements Serializable {
     private String apiTokenCredentialId;
     private boolean verifySsl;
     private String node;
+    private boolean clusterWidePlacement;
 
     public ProxmoxServerConfig(String host, String apiTokenCredentialId, boolean verifySsl, String node) {
+        this(host, apiTokenCredentialId, verifySsl, node, false);
+    }
+
+    public ProxmoxServerConfig(
+            String host, String apiTokenCredentialId, boolean verifySsl, String node, boolean clusterWidePlacement) {
         this.host = host;
         this.apiTokenCredentialId = apiTokenCredentialId;
         this.verifySsl = verifySsl;
         this.node = node;
+        this.clusterWidePlacement = clusterWidePlacement;
     }
 
     public String getHost() {
@@ -52,5 +59,13 @@ public class ProxmoxServerConfig implements Serializable {
 
     public void setNode(String node) {
         this.node = node;
+    }
+
+    public boolean isClusterWidePlacement() {
+        return clusterWidePlacement;
+    }
+
+    public void setClusterWidePlacement(boolean clusterWidePlacement) {
+        this.clusterWidePlacement = clusterWidePlacement;
     }
 }

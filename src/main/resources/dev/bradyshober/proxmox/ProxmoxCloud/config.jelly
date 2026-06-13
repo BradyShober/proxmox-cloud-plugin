@@ -9,8 +9,14 @@
         <f:textbox placeholder="https://proxmox.example.com:8006"/>
     </f:entry>
 
-    <f:entry title="${%Proxmox Node Name}" field="node">
-        <f:textbox placeholder="pve"/>
+    <div data-node-field="true">
+        <f:entry title="${%Proxmox Node Name}" field="node">
+            <f:textbox placeholder="pve"/>
+        </f:entry>
+    </div>
+
+    <f:entry title="${%Auto-select target node from cluster}" field="autoSelectNode">
+        <f:checkbox default="false"/>
     </f:entry>
 
     <f:entry title="${%Proxmox API Token Credential}" field="apiTokenCredentialId">
